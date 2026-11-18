@@ -563,6 +563,7 @@ async function openReview(id, order) {
         <div class="row"><span class="badge ${c.status === "ready" ? "info" : c.status === "posted" ? "ok" : c.status === "failed" ? "err" : ""}">${esc(c.status)}</span>
           ${c.streamer ? `<span class="badge">${ic("user")} ${esc(c.streamer)}</span>` : ""}<span class="badge">${ic("clock")} ${fmtDur(c.duration)}</span>
           ${{ game_only: `<span class="badge ok" title="Streamer's voice removed; in-game dialogue and sounds kept">🎮 streamer voice removed</span>`, no_voices: `<span class="badge" title="All voices removed, including in-game dialogue">🎮 all voices removed</span>`, original_fallback: `<span class="badge warn" title="Voice removal is not installed or failed — see Settings → General → System check">⚠ streamer voice kept</span>`, mute: `<span class="badge">🔇 muted</span>` }[(c.ai || {}).audio_used] || ""}
+          ${(c.ai || {}).edit_style === "troll" ? `<span class="badge info">😈 troll edit</span>` : ""}
           ${!c.streamer_permission ? `<span class="badge warn" title="Mark permission on the Streams page">${ic("lock")} no permission yet</span>` : ""}</div>
         <div class="verdict">
           <div class="row"><b>${ic("sparkles").replace("<svg", '<svg style="width:16px;height:16px;vertical-align:-3px;color:#a78bfa"')} ${ai.source === "claude" ? "AI editor" : "Auto-detected"}</b><div class="spacer"></div><span class="hype-score grad-text" style="font-size:30px">${v}</span><span class="small dim">/100</span></div>
@@ -576,6 +577,8 @@ async function openReview(id, order) {
         <label class="field">Hashtags <input class="input" data-f="hashtags" value="${esc((c.hashtags || []).join(" "))}"></label>
         <div class="row"><span class="small muted" style="font-weight:700">Layout</span><div class="seg" data-layouts>${[["crop", "Full screen"], ["blur", "Blurred bg"], ["split", "Cam on top"]].map(([l, n]) => `<button data-layout="${l}" class="${c.layout === l ? "on" : ""}">${n}</button>`).join("")}</div>
           <button class="btn sm ghost" data-reai title="Ask the AI editor again">${ic("wand")} Re-run AI</button></div>
+        <div class="row"><span class="small muted" style="font-weight:700">Edit</span><div class="seg" data-styles>${[["highlight", "🎬 Highlights"], ["troll", "😈 Troll edit"]].map(([k, n]) => `<button data-edit-style="${k}" class="${((c.ai || {}).edit_style || "highlight") === k ? "on" : ""}">${n}</button>`).join("")}</div>
+          <span class="small dim">Troll edit = AI-directed zooms, slow-mo, stickers, sound effects, narrator, music</span></div>
         ${posted.length ? `<div class="col">${posted.map((p) => `<div class="row small"><span class="badge ${p.platform}">${PLAT[p.platform]}</span><span>${p.status === "posted" ? `posted ${ago(p.posted_at)} · ${fmtNum(p.views)} views` : `${p.status} · ${dayOf(p.scheduled_at)} ${timeOf(p.scheduled_at)}`}</span>${p.url ? `<a class="btn sm ghost" href="${esc(p.url)}" target="_blank" rel="noopener">${ic("ext")}</a>` : ""}</div>`).join("")}</div>` : ""}
         <hr class="sep" style="margin:4px 0">
         <div class="row">
@@ -631,6 +634,14 @@ async function openReview(id, order) {
   $$("[data-layout]", m).forEach((b) => (b.onclick = async () => { try { await saveFields(); await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: { layout: b.dataset.layout } }); toast("Re-rendering…"); m.close(); } catch (e) { fail(e); } }));
   const ra = $("[data-render-anyway]", m);
   if (ra) ra.onclick = async () => { try { await api(`/api/clips/${c.id}/restore`, { method: "POST" }); toast("Rendering it now…"); m.close(); } catch (e) { fail(e); } };
+  $$("[data-edit-style]", m).forEach((b) => (b.onclick = async () => {
+    try {
+      await saveFields();
+      await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: { style: b.dataset.editStyle } });
+      toast(b.dataset.editStyle === "troll" ? "😈 Troll director is on it — this takes a few minutes" : "Re-rendering as a clean highlight…");
+      m.close();
+    } catch (e) { fail(e); }
+  }));
   $("[data-reai]", m).onclick = async () => { try { await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: { rerun_ai: true } }); toast("AI editor is taking another look…"); m.close(); } catch (e) { fail(e); } };
   $$("[data-f]", m).forEach((el) => el.addEventListener("change", () => saveFields().catch(fail)));
 
@@ -764,7 +775,15 @@ function facecamPicker(s) {
 // ================================================================== VOD LAB
 async function pageVod(page, seq) {
   page.innerHTML = header("VOD Lab", "Drop a past broadcast or paste a link — HYPECUT scans the whole thing and pulls the best moments.") +
-    `<div class="grid g2" style="margin-bottom:22px">
+    `<div class="card row" style="margin-bottom:18px;gap:16px">
+      <div><div style="font-weight:800">Edit style</div><div class="small muted">Applies to the next upload or link</div></div>
+      <div class="seg" id="vod-style">
+        <button data-style="highlight" class="on">🎬 Highlights</button>
+        <button data-style="troll">😈 Troll edit</button>
+      </div>
+      <div class="small muted" style="flex:1;min-width:220px" id="vod-style-hint">Clean clips with captions and a hook.</div>
+    </div>
+    <div class="grid g2" style="margin-bottom:22px">
       <label class="drop" id="drop"><input type="file" id="file" accept="video/*,.mkv,.ts,.flv" hidden>${ic("upload")}<h3>Drop a stream recording</h3><div class="muted">MP4 · MKV · MOV · TS · FLV · WEBM</div><div class="progress hidden" id="up-prog" style="margin:16px auto 0;max-width:320px"><i style="width:0"></i></div></label>
       <div class="card col" style="justify-content:center">
         <h3 style="margin:0;font-family:var(--display);font-size:28px;font-weight:400;letter-spacing:1px">Or paste a VOD link</h3>
@@ -779,10 +798,19 @@ async function pageVod(page, seq) {
   const opts = `<option value="">No streamer (own footage)</option>` + S.streamers.map((s) => `<option value="${s.id}">${esc(s.name)} · ${PLAT[s.platform]}</option>`).join("");
   $("#vod-streamer").innerHTML = opts;
   paintVodRuns();
+  let style = (() => { try { return localStorage.getItem("vodStyle") || "highlight"; } catch { return "highlight"; } })();
+  const vodStyle = () => style;
+  const hints = { highlight: "Clean clips with captions and a hook.", troll: "AI troll director: zooms, shake, slow-mo, meme stickers, sound effects, narrator and music." };
+  const paintStyle = () => {
+    $$("#vod-style [data-style]").forEach((b) => b.classList.toggle("on", b.dataset.style === style));
+    $("#vod-style-hint").textContent = hints[style];
+  };
+  $$("#vod-style [data-style]").forEach((b) => (b.onclick = () => { style = b.dataset.style; try { localStorage.setItem("vodStyle", style); } catch {} paintStyle(); }));
+  paintStyle();
   const drop = $("#drop"), file = $("#file");
   const upload = (f) => {
     if (!f) return;
-    const fd = new FormData(); fd.append("file", f); fd.append("streamer_id", $("#vod-streamer").value);
+    const fd = new FormData(); fd.append("file", f); fd.append("streamer_id", $("#vod-streamer").value); fd.append("style", vodStyle());
     const xhr = new XMLHttpRequest();
     const bar = $("#up-prog"); bar.classList.remove("hidden");
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) $("i", bar).style.width = `${(e.loaded / e.total) * 100}%`; };
@@ -797,7 +825,7 @@ async function pageVod(page, seq) {
   $("#url-form").onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    try { await api("/api/vod/url", { method: "POST", body: { url: fd.get("url"), streamer_id: fd.get("streamer_id") || null } }); toast("Downloading & scanning…"); e.target.reset(); }
+    try { await api("/api/vod/url", { method: "POST", body: { url: fd.get("url"), streamer_id: fd.get("streamer_id") || null, style: vodStyle() } }); toast("Downloading & scanning…"); e.target.reset(); }
     catch (err) { fail(err); }
   };
 }
@@ -1002,6 +1030,20 @@ function paintSettings() {
         <li>Generate a user token in Graph API Explorer, exchange it for a <b>long-lived token</b> (60 days), and read your IG user ID from <code>/me/accounts?fields=instagram_business_account</code>.</li>
         <li>Paste both here and hit <b>Test connection</b>. Refresh the token before it expires.</li></ol></details>
       ${saveBtn}
+    </div>
+    <div class="card section" style="margin-top:18px">
+      <div class="acct"><div class="logo" style="background:linear-gradient(135deg,#111,#444)">${ic("mic").replace("currentColor", "#fff")}</div><div><h4>ElevenLabs — troll voice, sound effects, music</h4><div class="small">${st.elevenlabs_set ? `<span class="badge ok">${ic("check")} key saved${getP("elevenlabs.voice_name") ? " · voice: " + esc(getP("elevenlabs.voice_name")) : ""}</span>` : `<span class="badge warn">no key — built-in sound effects only</span>`}</div></div></div>
+      <div class="help">Used by <b>Troll edit</b>: the narrator voice, custom meme sound effects and background music. Everything generated is cached, so each sound is only paid for once. Without a key, troll edits still work with built-in sound effects and on-screen narrator text.</div>
+      ${F.toggle("elevenlabs.enabled", "Use ElevenLabs")}
+      <div class="field-row">${F.secret("elevenlabs.api_key", "API key", "elevenlabs.io → Developers → API keys")}
+        <label class="field">Narrator voice <span class="hint">Load your voices, then pick one</span>
+          <div class="row" style="flex-wrap:nowrap"><select class="input" id="el-voice"><option value="${esc(getP("elevenlabs.voice_id"))}">${esc(getP("elevenlabs.voice_name") || (getP("elevenlabs.voice_id") ? getP("elevenlabs.voice_id") : "First voice on the account"))}</option></select>
+          <button class="btn sm" id="el-load" type="button">${ic("refresh")} Load</button></div></label></div>
+      <div class="row">${F.toggle("elevenlabs.use_voice", "Narrator voice")}${F.toggle("elevenlabs.use_sfx", "Sound effects")}${F.toggle("elevenlabs.use_music", "Background music")}</div>
+      <details class="help"><summary>Advanced: model names</summary>Leave empty for ElevenLabs' defaults. ElevenLabs is retiring <code>eleven_text_to_sound_v2</code> (Mar 2027) and <code>music_v1</code> (Jan 2027) — when that happens, put the newer model names from their docs here.
+        <div class="field-row" style="margin-top:10px">${F.text("elevenlabs.tts_model", "Voice model", "", "eleven_multilingual_v2")}${F.text("elevenlabs.sfx_model", "Sound effects model")}${F.text("elevenlabs.music_model", "Music model")}</div></details>
+      <div class="help"><b>Your own sounds:</b> drop audio files you have the rights to into<br><code>${esc(st.trollkit_sfx)}</code> (${st.trollkit_counts.sfx} files) and <code>${esc(st.trollkit_music)}</code> (${st.trollkit_counts.music} files). Name music files after a mood (e.g. <code>phonk_1.mp3</code>, <code>funny_beat.mp3</code>) and the troll director will pick them.</div>
+      ${saveBtn}
     </div>`;
   } else if (t === "ai") {
     html = `<div class="card section">
@@ -1032,6 +1074,16 @@ function paintSettings() {
   } else if (t === "style") {
     html = `<div class="card section"><div class="row" style="align-items:flex-start;gap:26px">
       <div class="col" style="flex:1;min-width:260px;gap:16px">
+        <h4>Quality</h4>
+        <div class="field-row">${F.select("render.resolution", "Resolution", [["1440p", "1440×2560 — sharpest on YouTube"], ["1080p", "1080×1920 — faster to render"]])}
+          ${F.select("render.fps", "Frame rate", [["auto", "Auto — 60 fps when the gameplay is 60"], ["60", "Always 60 fps"], ["30", "30 fps (fastest)"]])}</div>
+        <div class="help">YouTube Shorts and Instagram Reels play at most 60 fps, so 60 is the smoothest that viewers can actually see. 1440p uploads get YouTube's higher-quality encoding.</div>
+        ${F.toggle("render.enhance", "Enhance: light denoise + sharpen + colour pop")}
+        ${F.toggle("render.smooth_slowmo", "Smooth slow-motion (creates in-between frames)")}
+        <h4 style="margin-top:6px">Troll edit</h4>
+        ${F.select("render.edit_style", "Default edit for live streams", [["highlight", "🎬 Highlights"], ["troll", "😈 Troll edit"]], "VOD Lab lets you pick per upload; every clip can be switched in Review.")}
+        ${F.range("render.music_volume", "Music volume", 0, 0.5, 0.01)}
+        <h4 style="margin-top:6px">Look</h4>
         ${F.select("render.default_layout", "Default layout", [["auto", "Full screen 9:16, no facecam (recommended)"], ["blur", "Blurred background"], ["split", "Facecam on top + gameplay"]])}
         ${F.select("render.audio_mode", "Audio", [["game_only", "Remove the streamer's voice — keep game dialogue + sounds"], ["no_voices", "Remove all voices — game sounds only"], ["original", "Original (streamer + game)"], ["mute", "Muted"]], !st.voice ? "Needs the voice models: pip install -r requirements-ml.txt" : !st.speaker ? "Keeping game dialogue needs the speaker model (pip install -r requirements-ml.txt) — until then all voices are removed." : "Learns each streamer's voice over their first few clips, then mutes only them.")}
         ${F.toggle("render.captions", "Burn in word-by-word captions", st.whisper ? "Transcribed from the original audio, so they also work when the streamer's voice is removed." : "Needs the speech model: pip install -r requirements-ml.txt")}
@@ -1106,6 +1158,25 @@ function paintSettings() {
   on("#yt-conn", async () => { try { await saveSection(pane.querySelector(".card")); const r = await api("/api/settings/youtube/connect", { method: "POST" }); location.href = r.url; } catch (e) { fail(e); } });
   on("#yt-disc", async () => { await api("/api/settings/youtube/disconnect", { method: "POST" }).catch(fail); S.settings = await api("/api/settings"); paintSettings(); });
   on("#ig-test", async (e) => { const b = e.currentTarget; b.disabled = true; try { await saveSection(b.closest(".card")); const r = await api("/api/settings/instagram/test", { method: "POST" }); toast(`Instagram OK — @${r.username}`); S.settings = await api("/api/settings"); paintSettings(); } catch (er) { fail(er); } b.disabled = false; });
+  on("#el-load", async (e) => {
+    const b = e.currentTarget; b.disabled = true;
+    try {
+      await saveSection(b.closest(".card"));
+      const r = await api("/api/elevenlabs/voices");
+      const sel = $("#el-voice", pane);
+      const cur = getP("elevenlabs.voice_id");
+      sel.innerHTML = r.voices.map((v) => `<option value="${esc(v.voice_id)}" ${v.voice_id === cur ? "selected" : ""}>${esc(v.name)}${v.labels && v.labels.accent ? " · " + esc(v.labels.accent) : ""}</option>`).join("");
+      toast(`${r.voices.length} voices loaded — pick one`);
+      sel.dispatchEvent(new Event("change"));
+    } catch (er) { fail(er); }
+    b.disabled = false;
+  });
+  const voiceSel = $("#el-voice", pane);
+  if (voiceSel) voiceSel.onchange = async () => {
+    const opt = voiceSel.selectedOptions[0];
+    if (!opt || !opt.value) return;
+    try { await api("/api/settings/elevenlabs", { method: "PUT", body: { voice_id: opt.value, voice_name: opt.textContent.split(" · ")[0] } }); S.settings = await api("/api/settings"); toast(`Narrator: ${opt.textContent}`); } catch (er) { fail(er); }
+  };
   on("#ai-test", async (e) => { const b = e.currentTarget; b.disabled = true; try { await saveSection(b.closest(".card")); const r = await api("/api/settings/ai/test", { method: "POST" }); toast(`AI says: ${r.reply}`); S.settings = await api("/api/settings"); } catch (er) { fail(er); } b.disabled = false; });
   on("#logout-all", async () => { if (await confirmBox("Sign out everywhere?", "Every device, including this one, will need the password again.", "Sign out all", true)) { await api("/api/auth/logout-all", { method: "POST" }).catch(() => {}); S.authed = false; renderAuth(); } });
   const pw = $("#pw-form", pane);

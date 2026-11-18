@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
-from . import analytics, auth, bus, capture, config, db, media, publishers, speaker, speech, voice
+from . import analytics, auth, bus, capture, config, db, media, publishers, speaker, speech, trollkit, voice
 from .db import Clip, Post, Run, Streamer, utcnow
 from .engine import engine
 
@@ -31,6 +31,7 @@ VIDEO_EXT = {".mp4", ".mkv", ".mov", ".ts", ".flv", ".webm", ".m4v"}
 async def lifespan(app: FastAPI):
     db.init()
     await engine.start()
+    asyncio.get_running_loop().create_task(capabilities())  # warm the tool check in the background
     if not auth.is_configured():
         code = auth.setup_code()
         banner = "=" * 60
@@ -383,7 +384,7 @@ def _safe_name(name: str) -> str:
 
 
 @app.post("/api/vod/upload", dependencies=[Auth])
-async def vod_upload(file: UploadFile = File(...), streamer_id: str = Form("")) -> dict:
+async def vod_upload(file: UploadFile = File(...), streamer_id: str = Form(""), style: str = Form("highlight")) -> dict:
     ext = Path(file.filename or "").suffix.lower()
     if ext not in VIDEO_EXT:
         raise HTTPException(400, f"Unsupported file type {ext or '?'} — use {', '.join(sorted(VIDEO_EXT))}")
@@ -392,7 +393,7 @@ async def vod_upload(file: UploadFile = File(...), streamer_id: str = Form("")) 
         while chunk := await file.read(4 * 1024 * 1024):
             f.write(chunk)
     sid = int(streamer_id) if streamer_id.strip().isdigit() else None
-    rid = engine.start_vod(str(dest), sid, title=file.filename or dest.name)
+    rid = engine.start_vod(str(dest), sid, title=file.filename or dest.name, style=style)
     return {"run_id": rid}
 
 
@@ -403,7 +404,7 @@ async def vod_url(request: Request) -> dict:
     if not re.match(r"^https?://", url):
         raise HTTPException(400, "Paste a full http(s) link")
     sid = body.get("streamer_id")
-    rid = engine.start_vod(url, int(sid) if sid else None, is_url=True, title=url)
+    rid = engine.start_vod(url, int(sid) if sid else None, is_url=True, title=url, style=str(body.get("style") or "highlight"))
     return {"run_id": rid}
 
 
@@ -537,6 +538,9 @@ async def rerender_clip(cid: int, request: Request) -> dict:
     layout = body.get("layout")
     if layout and layout not in ("auto", "split", "blur", "crop"):
         raise HTTPException(400, "bad layout")
+    style = body.get("style")
+    if style and style not in ("highlight", "troll"):
+        raise HTTPException(400, "bad style")
     if engine.is_busy(cid):
         raise HTTPException(409, "This clip is already being processed — wait for it to finish")
     with db.session() as s:
@@ -546,7 +550,7 @@ async def rerender_clip(cid: int, request: Request) -> dict:
         c.status = "rendering"
         d = c.to_dict()
     bus.publish("clip", clip=d)
-    engine.enqueue_render(cid, layout=layout, rerun_ai=bool(body.get("rerun_ai")))
+    engine.enqueue_render(cid, layout=layout, rerun_ai=bool(body.get("rerun_ai")), style=style)
     return d
 
 
@@ -713,6 +717,30 @@ def _base_url(request: Request) -> str:
     return base.rstrip("/") if base else str(request.base_url).rstrip("/")
 
 
+_caps: dict = {}
+_caps_lock = asyncio.Lock()
+
+
+def _compute_caps() -> dict:
+    """Which optional tools are installed. Importing the AI models (PyTorch) takes seconds,
+    so this runs once, in a worker thread, never on the server's event loop."""
+    return {
+        "whisper": speech.available(),
+        "tesseract": shutil.which("tesseract") is not None,
+        "ffmpeg": shutil.which("ffmpeg") is not None,
+        "ffmpeg_libass": media.has_filter("subtitles"),
+        "voice": voice.available(),
+        "speaker": speaker.available(),
+    }
+
+
+async def capabilities() -> dict:
+    async with _caps_lock:
+        if not _caps:
+            _caps.update(await asyncio.get_running_loop().run_in_executor(None, _compute_caps))
+    return dict(_caps)
+
+
 @app.get("/api/settings", dependencies=[Auth])
 async def get_settings(request: Request) -> dict:
     yt = db.get_settings("youtube")
@@ -720,12 +748,11 @@ async def get_settings(request: Request) -> dict:
     return {
         "settings": db.redacted_settings(),
         "status": {
-            "whisper": speech.available(),
-            "tesseract": shutil.which("tesseract") is not None,
-            "ffmpeg": shutil.which("ffmpeg") is not None,
-            "ffmpeg_libass": media.has_filter("subtitles"),
-            "voice": voice.available(),
-            "speaker": speaker.available(),
+            **(await capabilities()),
+            "elevenlabs_set": bool(db.get_settings("elevenlabs").get("api_key")),
+            "trollkit_sfx": str(trollkit.kit_dir("sfx")),
+            "trollkit_music": str(trollkit.kit_dir("music")),
+            "trollkit_counts": {"sfx": len(trollkit.library("sfx")), "music": len(trollkit.library("music"))},
             "youtube_connected": bool(yt.get("refresh_token")),
             "youtube_channel": yt.get("channel_title", ""),
             "instagram_connected": bool(ig.get("user_id") and ig.get("access_token")),
@@ -800,6 +827,17 @@ async def instagram_test() -> dict:
     except publishers.PublishError as exc:
         raise HTTPException(400, str(exc))
     return {"ok": True, **data}
+
+
+@app.get("/api/elevenlabs/voices", dependencies=[Auth])
+async def elevenlabs_voices() -> dict:
+    if not db.get_settings("elevenlabs").get("api_key"):
+        raise HTTPException(400, "Save your ElevenLabs API key first")
+    try:
+        voices = await asyncio.get_running_loop().run_in_executor(None, trollkit.el_voices)
+    except Exception as exc:
+        raise HTTPException(400, f"ElevenLabs: {exc}")
+    return {"voices": voices}
 
 
 @app.post("/api/settings/ai/test", dependencies=[Auth])

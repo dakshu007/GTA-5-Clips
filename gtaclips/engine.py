@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
-from . import ai, auth, bus, capture, chat, config, db, media, publishers, render, signals, speaker, speech, voice
+from . import ai, auth, bus, capture, chat, config, db, media, publishers, render, signals, speaker, speech, troll, trollkit, voice
 from .db import Clip, Post, Run, Streamer, utcnow
 
 log = logging.getLogger(__name__)
@@ -134,14 +134,18 @@ class Engine:
             if not run:
                 return
             for k, v in fields.items():
+                if k == "stats":  # merge, so e.g. the chosen edit style survives progress updates
+                    v = {**(run.stats or {}), **(v or {})}
                 setattr(run, k, v)
         bus.publish("run", run=self.run_dict(run_id))
 
     # ------------------------------------------------------------ VOD
 
-    def start_vod(self, source: str, streamer_id: int | None = None, is_url: bool = False, title: str = "") -> int:
+    def start_vod(self, source: str, streamer_id: int | None = None, is_url: bool = False, title: str = "",
+                  style: str = "highlight") -> int:
         with db.session() as s:
             run = Run(streamer_id=streamer_id, kind="vod", source=source, status="downloading" if is_url else "processing",
+                      stats={"style": style if style in ("highlight", "troll") else "highlight"},
                       title=title or Path(source).name)
             s.add(run)
             s.flush()
@@ -270,9 +274,9 @@ class Engine:
             self.stages[clip_id] = {"stage": stage, "since": time.time()}
         bus.publish("clip_stage", id=clip_id, stage=stage)
 
-    def _render_job(self, clip_id: int, layout: str | None = None, rerun_ai: bool = False) -> None:
+    def _render_job(self, clip_id: int, layout: str | None = None, rerun_ai: bool = False, style: str | None = None) -> None:
         try:
-            self._render(clip_id, layout, rerun_ai)
+            self._render(clip_id, layout, rerun_ai, style)
         except Exception as exc:
             log.exception("render failed")
             self._clip_failed(clip_id, str(exc))
@@ -281,7 +285,27 @@ class Engine:
             with self._rq_lock:
                 self._render_queue.discard(clip_id)
 
-    def _render(self, clip_id: int, layout_override: str | None, rerun_ai: bool) -> None:
+    @staticmethod
+    def _troll_fx(plan: dict, duration: float) -> dict:
+        """Turn a troll plan into render inputs: resolve every sound effect, narrator line and the music."""
+        sfx, narration = [], []
+        for ev in plan["events"]:
+            if ev["type"] == "sfx":
+                sfx.append((trollkit.resolve_sfx(ev["sound"] or "boom", ev["dur"]), ev["t"], 0.85))
+            elif ev["type"] == "narration":
+                path = trollkit.resolve_narration(ev["text"])
+                if path:
+                    narration.append((path, ev["t"], ev["text"]))
+        return {
+            "slowmo": plan["slowmo"],
+            "events": plan["events"],
+            "ending_text": plan.get("ending_text", ""),
+            "sfx": sfx,
+            "narration": narration,
+            "music": trollkit.resolve_music(plan.get("music_mood", "none"), duration + 5),
+        }
+
+    def _render(self, clip_id: int, layout_override: str | None, rerun_ai: bool, style_override: str | None = None) -> None:
         with db.session() as s:
             clip = s.get(Clip, clip_id)
             if not clip:
@@ -400,6 +424,33 @@ class Engine:
         min_len = min(float(det_cfg.get("min_len", 15)), raw_dur)
         if raw_dur - trim_start - trim_end_cut < min_len:
             trim_start = trim_end_cut = 0.0
+
+        # ---- troll edit: AI director plans zooms/sfx/stickers/narration, then we gather the sounds
+        edit_style = (style_override or (c["ai"] or {}).get("edit_style") or (run_d.get("stats") or {}).get("style")
+                      or render_cfg.get("edit_style", "highlight"))
+        fx = None
+        troll_plan = None
+        new_plan = False
+        if edit_style == "troll":
+            trim_start = trim_end_cut = 0.0  # plan times are relative to the full clip
+            t_tr = time.time()
+            troll_plan = None if (rerun_ai or fresh_ai or style_override) else (c["ai"] or {}).get("troll_plan")
+            if not troll_plan:
+                self.stage(clip_id, "Troll director (AI)")
+                frames = render.timeline_frames(raw, clip_dir, raw_dur, n=8)
+                planned = troll.plan_with_ai(frames=frames, transcript=transcript, hype=c["signals"].get("series", []),
+                                             duration=raw_dur, streamer=streamer_name, ai_cfg=ai_cfg,
+                                             game=general.get("game", "GTA VI"))
+                for _t, f in frames:
+                    f.unlink(missing_ok=True)
+                troll_plan = troll.validate(planned or troll.template_plan(
+                    duration=raw_dur, peak=peak_off, top_signal=str(c["signals"].get("top", "audio"))), raw_dur)
+                new_plan = True
+            self.stage(clip_id, "Making troll sounds")
+            fx = self._troll_fx(troll_plan, raw_dur)
+            timings["troll"] = time.time() - t_tr
+            if new_plan and troll_plan.get("hook"):
+                hook = troll_plan["hook"]
         audio: Path | str | None = None
         audio_used = "original"
         t_step = time.time()
@@ -430,13 +481,15 @@ class Engine:
         self.stage(clip_id, "Rendering video")
         out_dur = render.render(raw, tmp, layout=layout, facecam=facecam, words=words, hook=hook, credit=credit,
                                 style=render_cfg, trim_start=trim_start, trim_end=raw_dur - trim_end_cut if trim_end_cut else None,
-                                audio=audio)
+                                audio=audio, fx=fx)
         timings["video"] = time.time() - t_step
         final = clip_dir / "video.mp4"
         tmp.replace(final)
         if tmp.with_suffix(".ass").exists():
             tmp.with_suffix(".ass").replace(clip_dir / "captions.ass")
-        thumb = render.thumbnail(final, clip_dir / "thumb.jpg", max(0.5, min(out_dur - 0.5, peak_off - trim_start)))
+        thumb_at = troll.TimeMap(troll_plan["slowmo"])(peak_off) if troll_plan else peak_off - trim_start
+        thumb = render.thumbnail(final, clip_dir / "thumb.jpg", max(0.5, min(out_dur - 0.5, thumb_at)))
+        style_info = {"edit_style": edit_style, "troll_plan": troll_plan} if troll_plan else {"edit_style": edit_style}
 
         with db.session() as s:
             clip = s.get(Clip, clip_id)
@@ -447,8 +500,19 @@ class Engine:
             clip.raw_path = str(raw)
             clip.duration = out_dur
             clip.layout = layout
+            if new_plan and troll_plan.get("source") == "claude":
+                # the troll director's packaging fits the troll edit better
+                for k in ("title", "caption"):
+                    if troll_plan.get(k):
+                        verdict = {**verdict, k: troll_plan[k]}
+                if troll_plan.get("hashtags"):
+                    verdict = {**verdict, "hashtags": troll_plan["hashtags"]}
+                if not fresh_ai:
+                    clip.title = verdict.get("title", clip.title)
+                    clip.caption = verdict.get("caption", clip.caption)
+                    clip.hashtags = verdict.get("hashtags", clip.hashtags)
             if fresh_ai:
-                clip.ai = {**verdict, "audio_used": audio_used}
+                clip.ai = {**verdict, "audio_used": audio_used, **style_info}
                 clip.virality = float(verdict.get("virality", 50))
                 clip.hook = hook
                 clip.title = verdict.get("title", "") if (not clip.title or rerun_ai) else clip.title
@@ -456,7 +520,9 @@ class Engine:
                 clip.hashtags = verdict.get("hashtags", []) if (not clip.hashtags or rerun_ai) else clip.hashtags
             else:
                 clip.hook = hook
-                clip.ai = {**(clip.ai or {}), "audio_used": audio_used}
+                clip.ai = {**(clip.ai or {}), "audio_used": audio_used, **style_info}
+                if not troll_plan:
+                    clip.ai.pop("troll_plan", None)
             reject = ai_cfg.get("auto_reject", True) and fresh_ai and (
                 not verdict.get("keep", True) or clip.virality < float(ai_cfg.get("min_virality", 35))
             )

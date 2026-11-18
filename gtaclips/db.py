@@ -314,9 +314,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "progress_bar": True,
         "progress_color": "#FF2E88",
         "whisper_model": "base",
-        "crf": 20,
+        "crf": 18,
         "preset": "veryfast",
         "hw_encode": True,
+        "resolution": "1440p",  # 1080p | 1440p (YouTube serves 1440p uploads in better quality)
+        "fps": "auto",  # auto = 60 when the gameplay is 60 fps | 60 | 30
+        "enhance": True,  # light denoise + sharpen + colour pop
+        "smooth_slowmo": True,  # interpolate slow-motion frames instead of repeating them
+        "edit_style": "highlight",  # highlight | troll
+        "music_volume": 0.16,
         "audio_mode": "game_only",  # game_only (mute streamer, keep game dialogue) | no_voices | original | mute
     },
     "ai": {
@@ -354,6 +360,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "share_to_feed": True,
         "username": "",
     },
+    "elevenlabs": {
+        "enabled": True,
+        "api_key": "",
+        "voice_id": "",
+        "voice_name": "",
+        "use_voice": True,
+        "use_sfx": True,
+        "use_music": True,
+        "tts_model": "",
+        "sfx_model": "",
+        "music_model": "",
+    },
     "money": {
         "youtube_rpm": 0.06,  # $ per 1k Shorts views (own-channel ad share estimate)
         "instagram_rpm": 0.0,
@@ -368,6 +386,7 @@ SECRET_KEYS = {
     ("youtube", "refresh_token"),
     ("youtube", "api_key"),
     ("instagram", "access_token"),
+    ("elevenlabs", "api_key"),
 }
 
 

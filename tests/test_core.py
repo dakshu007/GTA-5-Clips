@@ -288,3 +288,109 @@ def test_speech_segments_finds_talking_and_splits_long_bits():
     assert 4.0 <= covered <= 4.8
     assert segs[0][0] >= int(0.9 * rate)
     assert speaker.speech_segments(silence) == []
+
+
+# ---------------------------------------------------------------- troll edit
+
+def test_troll_plan_is_clamped_and_capped():
+    from gtaclips import troll
+
+    raw = {
+        "slowmo": {"enabled": True, "start": 10, "end": 30},  # too long -> 2.5 s max
+        "events": [{"type": "sticker", "t": i, "dur": 1, "text": f"LOL {i}", "sound": ""} for i in range(9)]
+        + [{"type": "narration", "t": 2, "dur": 99, "text": "x " * 40, "sound": ""},
+           {"type": "teleport", "t": 1, "dur": 1, "text": "", "sound": ""},
+           {"type": "zoom", "t": 50, "dur": 1, "text": "", "sound": ""}],
+        "music_mood": "jazz-fusion",
+    }
+    p = troll.validate(raw, 20.0)
+    assert p["slowmo"] == {"enabled": True, "start": 10.0, "end": 12.5}
+    assert sum(e["type"] == "sticker" for e in p["events"]) == 4
+    narr = [e for e in p["events"] if e["type"] == "narration"][0]
+    assert len(narr["text"].split()) <= 14 and narr["dur"] <= 6
+    assert all(e["type"] != "teleport" for e in p["events"])
+    assert all(0 <= e["t"] <= 20 and e["t"] + e["dur"] <= 20.01 for e in p["events"])
+    assert p["music_mood"] == "funny"
+
+
+def test_slowmo_time_map():
+    from gtaclips import troll
+
+    tm = troll.TimeMap({"enabled": True, "start": 10, "end": 12}, factor=0.5)
+    assert tm.extra == 2.0
+    assert tm(5) == 5 and tm(11) == 12 and tm(12) == 14 and tm(20) == 22
+
+
+def test_sound_requests_match_builtins():
+    from gtaclips import trollkit
+
+    assert trollkit.nearest_builtin("vine boom bass impact") == "boom"
+    assert trollkit.nearest_builtin("sad violin fail") == "sad_trombone"
+    assert trollkit.nearest_builtin("cartoon whoosh") == "whoosh"
+    assert trollkit.nearest_builtin("something weird") == "boom"
+
+
+def test_troll_ass_has_stickers_narration_and_ending():
+    from gtaclips import troll
+
+    events = [{"type": "sticker", "t": 1, "dur": 1, "text": "NAH", "sound": ""},
+              {"type": "narration", "t": 2, "dur": 2, "text": "He had one job", "sound": ""}]
+    lines = render.troll_ass_lines(events, troll.TimeMap({"enabled": False}), 30.0, "Follow for part 2")
+    joined = "\n".join(lines)
+    assert "Sticker" in joined and "NAH" in joined and "HE HAD ONE JOB" in joined and "FOLLOW FOR PART 2" in joined
+
+
+def test_elevenlabs_requests(monkeypatch, tmp_path):
+    import httpx
+
+    from gtaclips import config, db, trollkit
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    db.init(f"sqlite:///{tmp_path}/t.sqlite")
+    db.update_settings("elevenlabs", {"api_key": "sk-test", "voice_id": "VOICE1"})
+    seen = []
+
+    def fake_post(url, params=None, json=None, headers=None, timeout=None):
+        seen.append((url, params, json, headers))
+        return httpx.Response(200, content=b"ID3" + b"\0" * 1000)
+
+    monkeypatch.setattr(trollkit.httpx, "post", fake_post)
+    trollkit.el_sfx("vine boom", 1.0)
+    trollkit.el_sfx("vine boom", 1.0)  # cached: no second request
+    trollkit.el_tts("He had one job")
+    trollkit.el_music("phonk", 40)
+    urls = [u for u, *_ in seen]
+    assert urls == ["https://api.elevenlabs.io/v1/sound-generation",
+                    "https://api.elevenlabs.io/v1/text-to-speech/VOICE1",
+                    "https://api.elevenlabs.io/v1/music"]
+    assert all(h["xi-api-key"] == "sk-test" for *_, h in seen)
+    assert seen[0][2]["text"] == "vine boom" and seen[0][2]["duration_seconds"] == 1.0
+    assert seen[1][2]["text"] == "He had one job" and seen[1][1]["output_format"] == "mp3_44100_128"
+    assert seen[2][2]["force_instrumental"] is True and seen[2][2]["music_length_ms"] == 40000
+
+
+def test_troll_director_uses_claude_json(monkeypatch, tmp_path):
+    import json as _json
+    from types import SimpleNamespace
+
+    from gtaclips import ai, troll
+
+    plan = {"keep": True, "virality": 91, "reason": "r", "hook": "He did NOT see that", "title": "t", "caption": "c",
+            "hashtags": ["#GTA6"], "slowmo": {"enabled": True, "start": 3, "end": 4.5},
+            "events": [{"type": "zoom", "t": 3, "dur": 1, "text": "", "sound": ""}], "music_mood": "phonk",
+            "ending_text": "Part 2?"}
+    captured = {}
+
+    class FakeMessages:
+        def create(self, **kw):
+            captured.update(kw)
+            return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=_json.dumps(plan))])
+
+    monkeypatch.setattr(ai, "_client", lambda key: SimpleNamespace(beta=SimpleNamespace(messages=FakeMessages()), messages=FakeMessages()))
+    img = tmp_path / "f.jpg"
+    img.write_bytes(b"\xff\xd8\xff")
+    out = troll.plan_with_ai(frames=[(1.0, img)], transcript="", hype=[0.1, 0.9], duration=20, streamer="x",
+                             ai_cfg={"enabled": True, "model": "claude-opus-5-5"}, game="GTA VI")
+    assert out["source"] == "claude" and out["virality"] == 91
+    assert captured["output_config"]["format"]["schema"]["properties"]["events"]
+    assert any(b.get("type") == "image" for b in captured["messages"][0]["content"])

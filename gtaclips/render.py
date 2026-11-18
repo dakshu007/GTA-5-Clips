@@ -216,7 +216,7 @@ def render(
 
     graph = video_filter(layout, src_w, src_h, facecam, cx)
     if media.has_filter("subtitles"):
-        graph += f";[v0]subtitles='{_esc(ass_path)}':fontsdir='{_esc(config.FONTS_DIR)}'[v1]"
+        graph += f";[v0]subtitles=filename='{_esc(ass_path)}':fontsdir='{_esc(config.FONTS_DIR)}'[v1]"
         last = "v1"
     else:
         # ffmpeg built without libass: still make the clip, just without burned-in text

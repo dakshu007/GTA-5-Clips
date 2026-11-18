@@ -431,10 +431,17 @@ const TABS = [["ready", "To review"], ["scheduled", "Scheduled"], ["posted", "Po
 async function pageReview(page) {
   if (S.params.get("tab")) S.reviewTab = S.params.get("tab");
   page.innerHTML = header("Review", "Approve with <span class='kbd'>A</span>, skip with <span class='kbd'>S</span>, move with <span class='kbd'>←</span> <span class='kbd'>→</span>",
-    `<button class="btn" id="approve-all">${ic("check")} Approve all 70+</button>`) +
+    `<button class="btn" id="retry-failed">${ic("refresh")} Retry failed</button><button class="btn" id="approve-all">${ic("check")} Approve all 70+</button>`) +
     `<div class="tabs" id="tabs"></div><div id="grid"></div>`;
   S.clips = await api("/api/clips?limit=400");
   paintReviewGrid();
+  $("#retry-failed").onclick = async () => {
+    const failed = S.clips.filter((c) => c.status === "failed");
+    if (!failed.length) return toast("No failed clips");
+    for (const c of failed) { try { await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: {} }); } catch (e) { fail(e); break; } }
+    toast(`Re-rendering ${failed.length} clips…`);
+    S.reviewTab = "rendering,detected"; paintReviewGrid();
+  };
   $("#approve-all").onclick = async () => {
     const hot = S.clips.filter((c) => c.status === "ready" && c.virality >= 70);
     if (!hot.length) return toast("No ready clips with virality 70+");

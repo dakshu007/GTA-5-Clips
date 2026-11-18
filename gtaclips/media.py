@@ -17,7 +17,8 @@ class MediaError(RuntimeError):
 
 
 def run(args: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
-    proc = subprocess.run(args, capture_output=True, timeout=timeout)
+    # own session: a Ctrl+C on the server must not kill a cut/render half way
+    proc = subprocess.run(args, capture_output=True, timeout=timeout, start_new_session=True)
     if proc.returncode != 0:
         tail = proc.stderr.decode(errors="replace")[-1500:]
         raise MediaError(f"{Path(args[0]).name} failed ({proc.returncode}): {tail}")

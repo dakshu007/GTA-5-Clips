@@ -474,7 +474,7 @@ function clipCard(c) {
     ${busy ? `<div class="processing"><div class="col" style="align-items:center"><div class="spinner"></div><div class="small muted">${c.status === "detected" ? "Queued" : "Rendering"}</div></div></div>` : ""}
     <div class="shade"></div>
     <div class="top">${c.status === "failed" ? `<span class="badge err">failed</span>` : ""}${posted.map((p) => `<span class="badge ${p}">${ic(p === "youtube" ? "yt" : "ig")}</span>`).join("")}${!busy && v ? `<span class="viral ${viralClass(v)}">${v}</span>` : ""}</div>
-    <div class="bottom"><div class="title">${esc(c.title || c.hook || "Key moment")}</div>
+    <div class="bottom">${c.status === "failed" && c.error ? `<div class="small" style="color:#ff95a0;margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden">${esc(c.error)}</div>` : ""}<div class="title">${esc(c.title || c.hook || "Key moment")}</div>
       <div class="meta">${c.streamer ? `<span>${esc(c.streamer)}</span>·` : ""}<span>${fmtDur(c.duration)}</span>·<span>${ago(c.created_at)}</span></div></div>
   </div>`;
 }
@@ -1009,7 +1009,7 @@ function paintSettings() {
       <div class="field-row">${F.text("general.game", "Game", "Used in AI prompts and fallback titles")}${F.text("general.public_base_url", "Public base URL", "Only if you reach this dashboard via a domain/tunnel", "https://clips.example.com")}</div>
       ${saveBtn}
       <hr class="sep"><h4>System check</h4>
-      <div class="row">${[["ffmpeg", st.ffmpeg, "video engine"], ["faster-whisper", st.whisper, "captions + speech signal"], ["tesseract", st.tesseract, "in-game OCR"]].map(([n, ok, d]) => `<span class="badge ${ok ? "ok" : "warn"}">${ok ? ic("check") : ic("alert")} ${n} <span class="dim" style="font-weight:600">· ${d}</span></span>`).join("")}</div>
+      <div class="row">${[["ffmpeg", st.ffmpeg, "video engine"], ["ffmpeg text (libass)", st.ffmpeg_libass, "captions + hook text"], ["faster-whisper", st.whisper, "captions + speech signal"], ["tesseract", st.tesseract, "in-game OCR"]].map(([n, ok, d]) => `<span class="badge ${ok ? "ok" : "warn"}">${ok ? ic("check") : ic("alert")} ${n} <span class="dim" style="font-weight:600">· ${d}</span></span>`).join("")}</div>
     </div>`;
   } else if (t === "security") {
     html = `<div class="card section">

@@ -90,6 +90,21 @@ def gray_frames(
     return buf[: n * w * h].reshape(n, h, w)
 
 
+_filters: set[str] | None = None
+
+
+def has_filter(name: str) -> bool:
+    """Whether this ffmpeg build includes a filter (e.g. 'subtitles' needs libass)."""
+    global _filters
+    if _filters is None:
+        try:
+            out = subprocess.run([FFMPEG, "-hide_banner", "-filters"], capture_output=True, timeout=30).stdout.decode(errors="replace")
+            _filters = {parts[1] for line in out.splitlines() if len(parts := line.split()) >= 2}
+        except Exception:
+            _filters = set()
+    return name in _filters
+
+
 def snapshot(path: str | Path, at: float, out: str | Path, width: int = 1280) -> Path:
     out = Path(out)
     run(

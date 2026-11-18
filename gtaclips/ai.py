@@ -43,7 +43,7 @@ Rules:
   situation, not the outcome ("He stole a cop car with the cop inside"), max 7 words, no emoji, no hashtags.
 - Never invent things that are not in the frames or transcript. No fake claims, no misleading clickbait.
 - Always credit the streamer by name in the caption.
-- Trim only dead time at the start or end; the clip must stay at least 12 seconds long.
+- Trim only dead time at the start or end; the clip must stay at least {min_len:.0f} seconds long.
 - Style: {style}"""
 
 
@@ -108,6 +108,7 @@ def review_clip(
     duration: float,
     ai_cfg: dict,
     game: str,
+    min_len: float = 12.0,
 ) -> dict:
     if not ai_cfg.get("enabled", True):
         return fallback(streamer, signals, transcript, ai_cfg, game)
@@ -130,7 +131,7 @@ def review_clip(
         request = dict(
             model=ai_cfg.get("model") or "claude-opus-5-5",
             max_tokens=16000,
-            system=SYSTEM.format(game=game, style=ai_cfg.get("style", "")),
+            system=SYSTEM.format(game=game, style=ai_cfg.get("style", ""), min_len=min_len),
             messages=[{"role": "user", "content": content}],
             output_config={"effort": ai_cfg.get("effort") or "medium", "format": {"type": "json_schema", "schema": SCHEMA}},
         )
@@ -168,7 +169,7 @@ def review_clip(
     data["hashtags"] = [h if h.startswith("#") else f"#{h}" for h in data.get("hashtags", []) if h.strip()][:10]
     data["trim_start"] = max(0.0, float(data.get("trim_start", 0)))
     data["trim_end"] = max(0.0, float(data.get("trim_end", 0)))
-    if duration - data["trim_start"] - data["trim_end"] < 12:
+    if duration - data["trim_start"] - data["trim_end"] < min(min_len, duration):
         data["trim_start"] = data["trim_end"] = 0.0
     data["source"] = "claude"
     data["model"] = resp.model

@@ -691,6 +691,7 @@ async def get_settings(request: Request) -> dict:
             "whisper": speech.available(),
             "tesseract": shutil.which("tesseract") is not None,
             "ffmpeg": shutil.which("ffmpeg") is not None,
+            "ffmpeg_libass": media.has_filter("subtitles"),
             "youtube_connected": bool(yt.get("refresh_token")),
             "youtube_channel": yt.get("channel_title", ""),
             "instagram_connected": bool(ig.get("user_id") and ig.get("access_token")),

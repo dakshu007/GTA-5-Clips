@@ -12,12 +12,15 @@ streamer credit, progress bar. Audio is loudness-normalised to -14 LUFS.
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 import numpy as np
 
 from . import config, media
+
+log = logging.getLogger(__name__)
 
 W, H = 1080, 1920
 
@@ -212,8 +215,13 @@ def render(
     ass_path.write_text(build_ass(shifted, dur, hook, credit, style), encoding="utf-8")
 
     graph = video_filter(layout, src_w, src_h, facecam, cx)
-    graph += f";[v0]subtitles='{_esc(ass_path)}':fontsdir='{_esc(config.FONTS_DIR)}'[v1]"
-    last = "v1"
+    if media.has_filter("subtitles"):
+        graph += f";[v0]subtitles='{_esc(ass_path)}':fontsdir='{_esc(config.FONTS_DIR)}'[v1]"
+        last = "v1"
+    else:
+        # ffmpeg built without libass: still make the clip, just without burned-in text
+        log.warning("ffmpeg has no 'subtitles' filter (libass) — rendering without captions/hook text")
+        last = "v0"
     if style.get("progress_bar", True):
         color = "0x" + str(style.get("progress_color", "#FF2E88")).lstrip("#")
         graph += f";color=c={color}:s={W}x14:r=30:d={dur:.3f}[bar];[{last}][bar]overlay=x='-w+w*t/{dur:.3f}':y=H-14:eval=frame:shortest=1[v2]"

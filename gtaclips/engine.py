@@ -281,6 +281,7 @@ class Engine:
         render_cfg = db.get_settings("render")
         ai_cfg = db.get_settings("ai")
         general = db.get_settings("general")
+        det_cfg = db.get_settings("detection")
         clip_dir = config.CLIPS_DIR / str(clip_id)
         clip_dir.mkdir(parents=True, exist_ok=True)
         raw = clip_dir / "raw.mp4"
@@ -306,7 +307,8 @@ class Engine:
         if verdict is None:
             frames = render.ai_frames(raw, clip_dir, peak_off)
             verdict = ai.review_clip(frames=frames, transcript=transcript, signals=c["signals"], streamer=streamer_name,
-                                     duration=raw_dur, ai_cfg=ai_cfg, game=general.get("game", "GTA VI"))
+                                     duration=raw_dur, ai_cfg=ai_cfg, game=general.get("game", "GTA VI"),
+                                     min_len=float(det_cfg.get("min_len", 15)))
             for f in frames:
                 f.unlink(missing_ok=True)
             fresh_ai = True
@@ -336,6 +338,10 @@ class Engine:
 
         trim_start = float(verdict.get("trim_start", 0) or 0)
         trim_end_cut = float(verdict.get("trim_end", 0) or 0)
+        # never let trimming push a clip below the minimum length the owner chose
+        min_len = min(float(det_cfg.get("min_len", 15)), raw_dur)
+        if raw_dur - trim_start - trim_end_cut < min_len:
+            trim_start = trim_end_cut = 0.0
         tmp = clip_dir / "video.tmp.mp4"
         out_dur = render.render(raw, tmp, layout=layout, facecam=facecam, words=words, hook=hook, credit=credit,
                                 style=render_cfg, trim_start=trim_start, trim_end=raw_dur - trim_end_cut if trim_end_cut else None)

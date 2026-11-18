@@ -48,7 +48,9 @@ Rules:
 
 
 def _client(api_key: str) -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+    # short timeout: a stuck request must not hold up the render queue
+    opts = {"timeout": 120.0, "max_retries": 1}
+    return anthropic.Anthropic(api_key=api_key, **opts) if api_key else anthropic.Anthropic(**opts)
 
 
 def _b64(path: Path) -> str:

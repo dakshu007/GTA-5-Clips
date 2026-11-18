@@ -254,6 +254,11 @@ function handleEvent(m) {
       refreshOverview();
       break;
     }
+    case "clip_stage": {
+      const c = S.clips.find((x) => x.id === m.id);
+      if (c) { c.stage = m.stage; if (S.route === "review") paintReviewGrid(); }
+      break;
+    }
     case "clip_deleted":
       S.clips = S.clips.filter((c) => c.id !== m.id);
       if (S.route === "review") paintReviewGrid();
@@ -478,7 +483,7 @@ function clipCard(c) {
   const posted = (c.posts || []).filter((p) => p.status === "posted").map((p) => p.platform);
   return `<div class="clip-card" data-clip="${c.id}" tabindex="0">
     ${c.has_thumb ? `<img loading="lazy" src="/api/clips/${c.id}/thumb?v=${encodeURIComponent(c.updated_at || "")}" alt="">` : ""}
-    ${busy ? `<div class="processing"><div class="col" style="align-items:center"><div class="spinner"></div><div class="small muted">${c.status === "detected" ? "Queued" : "Rendering"}</div></div></div>` : ""}
+    ${busy ? `<div class="processing"><div class="col" style="align-items:center"><div class="spinner"></div><div class="small muted">${c.stage ? esc(c.stage) + "…" : c.status === "detected" ? "Queued" : "Waiting in line"}</div></div></div>` : ""}
     <div class="shade"></div>
     <div class="top">${c.status === "failed" ? `<span class="badge err">failed</span>` : ""}${posted.map((p) => `<span class="badge ${p}">${ic(p === "youtube" ? "yt" : "ig")}</span>`).join("")}${!busy && v ? `<span class="viral ${viralClass(v)}">${v}</span>` : ""}</div>
     <div class="bottom">${c.status === "failed" && c.error ? `<div class="small" style="color:#ff95a0;margin-bottom:6px;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden">${esc(c.error)}</div>` : ""}<div class="title">${esc(c.title || c.hook || "Key moment")}</div>

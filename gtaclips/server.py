@@ -419,6 +419,7 @@ async def list_clips(status: str = "", streamer_id: int | None = None, limit: in
     for c in clips:
         c["posts"] = posts.get(c["id"], [])
         c["streamer"] = names.get(c["streamer_id"], "")
+        c["stage"] = (engine.stages.get(c["id"]) or {}).get("stage")
     return clips
 
 

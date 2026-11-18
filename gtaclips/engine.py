@@ -26,7 +26,7 @@ ACTIVE_RUN = ("starting", "live", "processing", "downloading")
 class Engine:
     def __init__(self) -> None:
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.render_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
+        self.render_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="render")
         self.job_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="vod")
         self.publish_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="publish")
         self.io_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="io")
@@ -34,6 +34,7 @@ class Engine:
         self.vod_cancel: dict[int, threading.Event] = {}
         self._tasks: list[asyncio.Task] = []
         self._render_queue: set[int] = set()
+        self.stages: dict[int, dict] = {}  # clip_id -> {stage, since} while a render job runs
         self._rq_lock = threading.Lock()
 
     # ------------------------------------------------------------ lifecycle
@@ -253,6 +254,13 @@ class Engine:
         bus.publish("clip", clip=d)
         bus.activity("clip", f"Clip #{clip_id} failed: {err[:160]}", level="error", clip_id=clip_id)
 
+    def stage(self, clip_id: int, stage: str | None) -> None:
+        if stage is None:
+            self.stages.pop(clip_id, None)
+        else:
+            self.stages[clip_id] = {"stage": stage, "since": time.time()}
+        bus.publish("clip_stage", id=clip_id, stage=stage)
+
     def _render_job(self, clip_id: int, layout: str | None = None, rerun_ai: bool = False) -> None:
         try:
             self._render(clip_id, layout, rerun_ai)
@@ -260,6 +268,7 @@ class Engine:
             log.exception("render failed")
             self._clip_failed(clip_id, str(exc))
         finally:
+            self.stage(clip_id, None)
             with self._rq_lock:
                 self._render_queue.discard(clip_id)
 
@@ -285,6 +294,7 @@ class Engine:
         clip_dir = config.CLIPS_DIR / str(clip_id)
         clip_dir.mkdir(parents=True, exist_ok=True)
         raw = clip_dir / "raw.mp4"
+        self.stage(clip_id, "Preparing")
         if not raw.exists():
             if run_d.get("kind") == "vod" and Path(run_d.get("source", "")).exists():
                 capture.cut_file(run_d["source"], c["start"], c["end"], raw)
@@ -293,6 +303,7 @@ class Engine:
 
         words = c["words"]
         if not words and speech.available() and render_cfg.get("captions", True):
+            self.stage(clip_id, "Writing captions")
             try:
                 words = speech.transcribe(raw, render_cfg.get("whisper_model", "base"))
             except Exception as exc:  # model download blocked, out of memory, ...
@@ -305,6 +316,7 @@ class Engine:
         streamer_name = st_d["name"] if st_d else (run_d.get("title") or "Streamer")
         verdict = c["ai"] if c["ai"] and not rerun_ai else None
         if verdict is None:
+            self.stage(clip_id, "AI editor")
             frames = render.ai_frames(raw, clip_dir, peak_off)
             verdict = ai.review_clip(frames=frames, transcript=transcript, signals=c["signals"], streamer=streamer_name,
                                      duration=raw_dur, ai_cfg=ai_cfg, game=general.get("game", "GTA VI"),
@@ -343,6 +355,7 @@ class Engine:
         if raw_dur - trim_start - trim_end_cut < min_len:
             trim_start = trim_end_cut = 0.0
         tmp = clip_dir / "video.tmp.mp4"
+        self.stage(clip_id, "Rendering video")
         out_dur = render.render(raw, tmp, layout=layout, facecam=facecam, words=words, hook=hook, credit=credit,
                                 style=render_cfg, trim_start=trim_start, trim_end=raw_dur - trim_end_cut if trim_end_cut else None)
         final = clip_dir / "video.mp4"

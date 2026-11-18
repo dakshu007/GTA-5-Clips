@@ -293,7 +293,7 @@ class Analyzer:
         cfg = self.cfg
         thr = float(cfg.get("threshold", 0.55))
         warm = float(cfg.get("warmup", 20))
-        cooldown = float(cfg.get("cooldown", 35))
+        cooldown = max(float(cfg.get("cooldown", 35)), float(cfg.get("min_len", 15)))  # no overlapping clips
         n = len(self._combined)
         limit = n if final else n - self.LOOKAHEAD
         c = self._combined

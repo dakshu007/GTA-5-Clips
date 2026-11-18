@@ -203,7 +203,7 @@ def _layout_filter(layout: str, src_w: int, src_h: int, facecam: dict | None, cx
     fg_h = 780
     return (
         f"[0:v]split=2[a][b];"
-        f"[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=24:2,eq=brightness=-0.10:saturation=1.25[bg];"
+        f"[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=6:2,scale={W}:{H},eq=brightness=-0.10:saturation=1.25[bg];"
         f"[b]scale=-2:{fg_h},crop='min(iw,{W})':{fg_h}[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2-60,setsar=1[v0]"
     )
@@ -261,12 +261,10 @@ def render(
     args += ["-filter_complex", graph, "-map", f"[{last}]", "-map", "0:a:0" if has_a else "1:a:0"]
     if has_a:
         args += ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
-    args += [
-        "-r", "30", "-c:v", "libx264", "-preset", str(style.get("preset", "veryfast")), "-crf", str(style.get("crf", 20)),
-        "-profile:v", "high", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
-        "-movflags", "+faststart", "-shortest", str(out),
-    ]
-    media.run(args, timeout=1800)
+    tail = ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-movflags", "+faststart", "-shortest", str(out)]
+    media.run_encode(lambda enc: args + ["-r", "30", *enc] + tail, timeout=1800,
+                     bitrate="10M", crf=int(style.get("crf", 20)), preset=str(style.get("preset", "veryfast")),
+                     hw=bool(style.get("hw_encode", True)))
     return media.duration(out)
 
 

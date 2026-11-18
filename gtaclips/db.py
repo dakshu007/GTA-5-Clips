@@ -316,6 +316,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "whisper_model": "base",
         "crf": 20,
         "preset": "veryfast",
+        "hw_encode": True,
     },
     "ai": {
         "enabled": True,

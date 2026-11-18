@@ -106,6 +106,43 @@ def has_filter(name: str) -> bool:
     return name in _filters
 
 
+_encoders: set[str] | None = None
+
+
+def has_encoder(name: str) -> bool:
+    global _encoders
+    if _encoders is None:
+        try:
+            out = subprocess.run([FFMPEG, "-hide_banner", "-encoders"], capture_output=True, timeout=30).stdout.decode(errors="replace")
+            _encoders = {parts[1] for line in out.splitlines() if len(parts := line.split()) >= 2}
+        except Exception:
+            _encoders = set()
+    return name in _encoders
+
+
+_hw_broken = False
+
+
+def h264_args(bitrate: str = "10M", crf: int = 20, preset: str = "veryfast", hw: bool = True) -> list[str]:
+    """Encoder args: the Mac's VideoToolbox chip when available (much faster), else libx264."""
+    if hw and not _hw_broken and has_encoder("h264_videotoolbox"):
+        return ["-c:v", "h264_videotoolbox", "-b:v", bitrate, "-profile:v", "high", "-allow_sw", "1", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-profile:v", "high", "-pix_fmt", "yuv420p"]
+
+
+def run_encode(build, timeout: float | None = None, **enc) -> subprocess.CompletedProcess:
+    """Run ``build(encoder_args)``; if the hardware encoder fails, retry once on the CPU."""
+    global _hw_broken
+    args = h264_args(**enc)
+    try:
+        return run(build(args), timeout=timeout)
+    except MediaError:
+        if args[1] != "h264_videotoolbox":
+            raise
+        _hw_broken = True  # don't keep trying a broken hardware encoder
+        return run(build(h264_args(**{**enc, "hw": False})), timeout=timeout)
+
+
 def snapshot(path: str | Path, at: float, out: str | Path, width: int = 1280) -> Path:
     out = Path(out)
     run(

@@ -521,7 +521,9 @@ async function openReview(id, order) {
     <button class="btn icon ghost modal-x" data-close title="Close (Esc)">${ic("x")}</button>
     <div class="review">
       <div>
-        <div class="player">${c.has_video ? `<video controls autoplay playsinline src="/api/clips/${c.id}/video?v=${encodeURIComponent(c.updated_at)}"></video>` : `<div class="processing"><div class="col" style="align-items:center"><div class="spinner"></div><div>${c.status === "failed" ? esc(c.error) : "Rendering… this updates by itself"}</div></div></div>`}</div>
+        <div class="player">${c.has_video ? `<video controls autoplay playsinline src="/api/clips/${c.id}/video?v=${encodeURIComponent(c.updated_at)}"></video>`
+          : c.status === "rejected" ? `${c.has_thumb ? `<img src="/api/clips/${c.id}/thumb?v=${encodeURIComponent(c.updated_at)}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.35">` : ""}<div class="processing"><div class="col" style="align-items:center;padding:20px"><div style="font-weight:800;color:var(--text)">Skipped by the AI editor</div><div class="small">Not rendered, to save time.</div><button class="btn primary" data-render-anyway>${ic("film")} Render it anyway</button></div></div>`
+          : `<div class="processing"><div class="col" style="align-items:center"><div class="spinner"></div><div>${c.status === "failed" ? esc(c.error) : "Rendering… this updates by itself"}</div></div></div>`}</div>
         <div class="row" style="justify-content:center;margin-top:12px">
           <button class="btn sm ghost" data-prev>${ic("left")} Prev</button>
           <span class="small dim">${order.indexOf(c.id) + 1} / ${order.length}</span>
@@ -594,6 +596,8 @@ async function openReview(id, order) {
   $("[data-skip]", m).onclick = async () => { try { await api(`/api/clips/${c.id}/reject`, { method: "POST" }); toast("Skipped"); go(1); } catch (e) { fail(e); } };
   $("[data-del]", m).onclick = async () => { if (await confirmBox("Delete clip?", "The video files are removed from disk.", "Delete", true)) { try { await api(`/api/clips/${c.id}`, { method: "DELETE" }); toast("Deleted"); go(1); } catch (e) { fail(e); } } };
   $$("[data-layout]", m).forEach((b) => (b.onclick = async () => { try { await saveFields(); await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: { layout: b.dataset.layout } }); toast(`Re-rendering as ${b.dataset.layout}…`); m.close(); } catch (e) { fail(e); } }));
+  const ra = $("[data-render-anyway]", m);
+  if (ra) ra.onclick = async () => { try { await api(`/api/clips/${c.id}/restore`, { method: "POST" }); toast("Rendering it now…"); m.close(); } catch (e) { fail(e); } };
   $("[data-reai]", m).onclick = async () => { try { await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: { rerun_ai: true } }); toast("AI editor is taking another look…"); m.close(); } catch (e) { fail(e); } };
   $$("[data-f]", m).forEach((el) => el.addEventListener("change", () => saveFields().catch(fail)));
 

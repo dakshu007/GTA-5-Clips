@@ -348,6 +348,31 @@ class Engine:
         template = str(render_cfg.get("credit_template", "") or "")
         credit = template.replace("{platform_url}", purl or streamer_name).replace("{name}", streamer_name) if template else ""
 
+        # Clips the AI editor turns down are not rendered (rendering is the slow part).
+        # They get a thumbnail and land in "Skipped"; restoring one renders it then.
+        if fresh_ai and not layout_override and ai_cfg.get("auto_reject", True) and (
+            not verdict.get("keep", True) or float(verdict.get("virality", 50)) < float(ai_cfg.get("min_virality", 35))
+        ):
+            thumb = render.thumbnail(raw, clip_dir / "thumb.jpg", max(0.5, min(raw_dur - 0.5, peak_off)))
+            with db.session() as s:
+                clip = s.get(Clip, clip_id)
+                if not s.scalars(select(Post).where(Post.clip_id == clip_id, Post.status.in_(("scheduled", "posting", "posted")))).first():
+                    clip.words, clip.transcript, clip.ai = words, transcript, verdict
+                    clip.virality = float(verdict.get("virality", 50))
+                    clip.hook, clip.layout = hook, layout
+                    clip.title = clip.title or verdict.get("title", "")
+                    clip.caption = clip.caption or verdict.get("caption", "")
+                    clip.hashtags = clip.hashtags or verdict.get("hashtags", [])
+                    clip.thumb_path, clip.raw_path = str(thumb), str(raw)
+                    clip.status = "rejected"
+                    d = clip.to_dict()
+                else:
+                    d = None
+            if d:
+                bus.publish("clip", clip=d)
+                bus.activity("clip", f"AI skipped a clip: {verdict.get('reason', '')[:140]}", level="muted", clip_id=clip_id)
+                return
+
         trim_start = float(verdict.get("trim_start", 0) or 0)
         trim_end_cut = float(verdict.get("trim_end", 0) or 0)
         # never let trimming push a clip below the minimum length the owner chose

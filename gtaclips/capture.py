@@ -249,12 +249,11 @@ class LiveCapture:
         lst.write_text("".join(f"file '{s.path.as_posix()}'\n" for s in segs))
         ss = max(0.0, start - segs[0].t0)
         try:
-            media.run([
+            media.run_encode(lambda enc: [
                 media.FFMPEG, "-v", "error", "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
-                "-ss", f"{ss:.3f}", "-t", f"{end - start:.3f}",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-ss", f"{ss:.3f}", "-t", f"{end - start:.3f}", *enc,
                 "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out),
-            ], timeout=600)
+            ], timeout=600, bitrate="16M", crf=18)
         finally:
             lst.unlink(missing_ok=True)
         return out
@@ -275,10 +274,9 @@ class LiveCapture:
 
 
 def cut_file(src: str | Path, start: float, end: float, out: Path) -> Path:
-    media.run([
+    media.run_encode(lambda enc: [
         media.FFMPEG, "-v", "error", "-nostdin", "-y", "-ss", f"{max(0.0, start):.3f}", "-i", str(src),
-        "-t", f"{end - start:.3f}", "-map", "0:v:0", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+        "-t", f"{end - start:.3f}", "-map", "0:v:0", "-map", "0:a:0?", *enc,
         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out),
-    ], timeout=900)
+    ], timeout=900, bitrate="16M", crf=18)
     return out

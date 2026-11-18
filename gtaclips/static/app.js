@@ -670,7 +670,9 @@ function paintRuns() {
   if (!rows.length) { el.innerHTML = `<div class="empty small">No live sessions yet.</div>`; return; }
   el.innerHTML = `<table class="table"><tr><th>Stream</th><th>Status</th><th>Length</th><th>Moments</th><th>Chat</th><th>Started</th><th></th></tr>${rows.map((r) => `
     <tr><td class="ellipsis" style="max-width:240px">${esc(r.title)}</td><td>${runBadge(r)}${r.error ? `<div class="small" style="color:#ff95a0;max-width:280px">${esc(r.error)}</div>` : ""}</td>
-    <td class="mono">${fmtDur(r.stats?.duration)}</td><td>${r.stats?.moments ?? 0}</td><td>${fmtNum(r.stats?.chat_messages || 0)}</td><td class="dim">${ago(r.started_at)}</td>
+    <td class="mono">${fmtDur(r.live?.timeline ?? r.stats?.duration)}</td><td>${r.live?.moments ?? r.stats?.moments ?? 0}</td>
+    <td>${r.live ? (r.live.chat_connected ? `<span class="badge ok">💬 ${fmtNum(r.live.chat_messages)}</span>` : `<span class="badge warn" title="${esc(r.live.chat_error || "connecting…")}">chat off</span>${r.live.chat_error ? `<div class="small" style="color:#ffb98a;max-width:260px">${esc(r.live.chat_error.slice(0, 140))}</div>` : ""}`) : fmtNum(r.stats?.chat_messages || 0)}</td>
+    <td class="dim">${ago(r.started_at)}</td>
     <td>${["live", "starting"].includes(r.status) ? `<button class="btn sm danger" data-stoprun="${r.id}">${ic("stop")}</button>` : ""}</td></tr>`).join("")}</table>`;
   $$("[data-stoprun]", el).forEach((b) => (b.onclick = () => api(`/api/runs/${b.dataset.stoprun}/stop`, { method: "POST" }).then(() => toast("Stopping…")).catch(fail)));
 }

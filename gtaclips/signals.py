@@ -217,7 +217,7 @@ def robust_scores(raw: np.ndarray, upto: int, smooth: int = 1, min_history: int 
         mad = float(np.median(np.abs(hist - med))) * 1.4826
         spread = max(mad, 1e-3, 0.05 * abs(med))
         z = (v - med) / spread
-        out[i] = min(1.0, max(0.0, (z - 1.0) / 4.0))  # z<=1 → 0, z>=5 → 1
+        out[i] = min(1.0, max(0.0, (z - 1.0) / 3.0))  # z<=1 → 0, z>=4 → 1
     return out
 
 
@@ -225,7 +225,7 @@ def combine(per_signal: dict[str, np.ndarray], weights: dict[str, float]) -> np.
     n = len(next(iter(per_signal.values())))
     keep = np.ones(n, dtype=np.float64)
     for k, s in per_signal.items():
-        c = min(0.95, 0.6 * float(weights.get(k, 1.0)))
+        c = min(0.95, 0.7 * float(weights.get(k, 1.0)))
         keep *= 1.0 - np.clip(s, 0, 1) * c
     return 1.0 - keep
 

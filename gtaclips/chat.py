@@ -145,10 +145,23 @@ class KickChat(ChatListener):
         self.chatroom_id: int | None = None
 
     async def _resolve(self) -> int:
-        async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}) as c:
-            r = await c.get(f"https://kick.com/api/v2/channels/{self.slug}")
-            r.raise_for_status()
-            return int(r.json()["chatroom"]["id"])
+        """Find the channel's chatroom id. kick.com sits behind Cloudflare, so plain HTTP
+        requests get 403 — reuse streamlink's Kick plugin, which carries the browser
+        cookies/headers it already obtained for the video stream (and can re-solve the
+        challenge with Chrome if they expired)."""
+        errors = []
+        try:
+            return await asyncio.to_thread(kick_chatroom_id_via_streamlink, self.slug)
+        except Exception as exc:
+            errors.append(f"streamlink: {exc}")
+        try:
+            async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}) as c:
+                r = await c.get(f"https://kick.com/api/v2/channels/{self.slug}")
+                r.raise_for_status()
+                return int(r.json()["chatroom"]["id"])
+        except Exception as exc:
+            errors.append(f"direct: {exc}")
+        raise RuntimeError("Kick blocked the chat lookup (Cloudflare). " + " | ".join(errors)[:300])
 
     async def _run_once(self) -> None:
         if self.chatroom_id is None:
@@ -171,6 +184,26 @@ class KickChat(ChatListener):
                     self.emit(str(data.get("content", "")))
                 elif ev.endswith(("SubscriptionEvent", "GiftedSubscriptionsEvent")):
                     self.emit("sub", extra=3.0)
+
+
+def kick_chatroom_id_via_streamlink(slug: str) -> int:
+    from streamlink import Streamlink
+
+    session = Streamlink()
+    _name, plugincls, resolved = session.resolve_url(f"https://kick.com/{slug}")
+    plugin = plugincls(session, resolved)  # loads streamlink's cached Kick cookies + headers
+    api = f"https://kick.com/api/v2/channels/{slug}"
+
+    def get():
+        headers = plugin._get_api_headers() if hasattr(plugin, "_get_api_headers") else {"Accept": "application/json"}
+        return plugin.session.http.get(api, headers=headers, raise_for_status=False, timeout=20)
+
+    res = get()
+    if res.status_code == 403 and hasattr(plugin, "_get_cookies_from_webbrowser") and plugin._get_cookies_from_webbrowser():
+        res = get()
+    if res.status_code != 200:
+        raise RuntimeError(f"Kick API returned {res.status_code}")
+    return int(res.json()["chatroom"]["id"])
 
 
 class YouTubeChat(ChatListener):

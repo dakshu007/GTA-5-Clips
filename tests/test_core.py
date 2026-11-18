@@ -110,6 +110,18 @@ def test_analyzer_finds_audio_spikes():
         assert m.start <= m.peak <= m.end
 
 
+def test_moderate_scream_triggers_without_chat():
+    """No chat connection: a clear-but-not-extreme audio spike must still be clipped."""
+    rng = np.random.default_rng(5)
+    audio = -30 + rng.normal(0, 2.0, 200)  # busy game audio, ~2 dB wobble
+    audio[120:122] = -30 + 9  # streamer yells ~4.5 sigma above normal
+    found = []
+    an = signals.Analyzer(CFG, on_moment=found.append)
+    _feed(an, audio)
+    an.advance(200, final=True)
+    assert len(found) == 1 and 118 <= found[0].peak <= 123
+
+
 def test_analyzer_quiet_stream_has_no_moments():
     rng = np.random.default_rng(1)
     found = []

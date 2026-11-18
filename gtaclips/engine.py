@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
-from . import ai, auth, bus, capture, chat, config, db, media, publishers, render, signals, speech, voice
+from . import ai, auth, bus, capture, chat, config, db, media, publishers, render, signals, speaker, speech, voice
 from .db import Clip, Post, Run, Streamer, utcnow
 
 log = logging.getLogger(__name__)
@@ -405,13 +405,19 @@ class Engine:
         t_step = time.time()
         if audio_mode == "mute":
             audio, audio_used = "mute", "mute"
-        elif audio_mode == "game_only" and media.has_audio(raw):
+        elif audio_mode in ("game_only", "no_voices") and media.has_audio(raw):
             audio_used = "original_fallback"  # unless voice removal succeeds below
+            keep_dialogue = audio_mode == "game_only"
+            if keep_dialogue and not speaker.available() and not getattr(self, "_warned_speaker", False):
+                self._warned_speaker = True
+                bus.activity("clip", "Keeping in-game dialogue needs the speaker model: run  pip install -r requirements-ml.txt  "
+                             "then restart. Until then ALL voices are removed.", level="warn")
             if voice.available():
                 self.stage(clip_id, "Removing streamer voice")
                 game_wav = clip_dir / "game_audio.wav"
-                if voice.remove_voice(raw, game_wav):
-                    audio, audio_used = game_wav, "game_only"
+                done = voice.remove_voice(raw, game_wav, key=str(c["streamer_id"] or "default"), keep_dialogue=keep_dialogue)
+                if done:
+                    audio, audio_used = game_wav, done
                 else:
                     bus.activity("clip", f"Clip #{clip_id}: voice removal failed — kept original audio", level="warn", clip_id=clip_id)
             elif not getattr(self, "_warned_voice", False):

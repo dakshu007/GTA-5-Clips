@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
-from . import analytics, auth, bus, capture, config, db, media, publishers, speech, voice
+from . import analytics, auth, bus, capture, config, db, media, publishers, speaker, speech, voice
 from .db import Clip, Post, Run, Streamer, utcnow
 from .engine import engine
 
@@ -303,6 +303,16 @@ async def watch_streamer(sid: int) -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return {"run_id": rid}
+
+
+@app.delete("/api/streamers/{sid}/voiceprint", dependencies=[Auth])
+async def reset_voiceprint(sid: int) -> dict:
+    """Forget the learned streamer voice (if it ever learned a game character by mistake)."""
+    with db.session() as s:
+        if not s.get(Streamer, sid):
+            raise HTTPException(404)
+    speaker.reset_prints(str(sid))
+    return {"ok": True}
 
 
 @app.post("/api/streamers/{sid}/check", dependencies=[Auth])
@@ -715,6 +725,7 @@ async def get_settings(request: Request) -> dict:
             "ffmpeg": shutil.which("ffmpeg") is not None,
             "ffmpeg_libass": media.has_filter("subtitles"),
             "voice": voice.available(),
+            "speaker": speaker.available(),
             "youtube_connected": bool(yt.get("refresh_token")),
             "youtube_channel": yt.get("channel_title", ""),
             "instagram_connected": bool(ig.get("user_id") and ig.get("access_token")),

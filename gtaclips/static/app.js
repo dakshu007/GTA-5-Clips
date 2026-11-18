@@ -562,7 +562,7 @@ async function openReview(id, order) {
       <div class="review-side">
         <div class="row"><span class="badge ${c.status === "ready" ? "info" : c.status === "posted" ? "ok" : c.status === "failed" ? "err" : ""}">${esc(c.status)}</span>
           ${c.streamer ? `<span class="badge">${ic("user")} ${esc(c.streamer)}</span>` : ""}<span class="badge">${ic("clock")} ${fmtDur(c.duration)}</span>
-          ${{ game_only: `<span class="badge ok">🎮 game audio only</span>`, original_fallback: `<span class="badge warn" title="Voice removal is not installed or failed — see Settings → General → System check">⚠ streamer voice kept</span>`, mute: `<span class="badge">🔇 muted</span>` }[(c.ai || {}).audio_used] || ""}
+          ${{ game_only: `<span class="badge ok" title="Streamer's voice removed; in-game dialogue and sounds kept">🎮 streamer voice removed</span>`, no_voices: `<span class="badge" title="All voices removed, including in-game dialogue">🎮 all voices removed</span>`, original_fallback: `<span class="badge warn" title="Voice removal is not installed or failed — see Settings → General → System check">⚠ streamer voice kept</span>`, mute: `<span class="badge">🔇 muted</span>` }[(c.ai || {}).audio_used] || ""}
           ${!c.streamer_permission ? `<span class="badge warn" title="Mark permission on the Streams page">${ic("lock")} no permission yet</span>` : ""}</div>
         <div class="verdict">
           <div class="row"><b>${ic("sparkles").replace("<svg", '<svg style="width:16px;height:16px;vertical-align:-3px;color:#a78bfa"')} ${ai.source === "claude" ? "AI editor" : "Auto-detected"}</b><div class="spacer"></div><span class="hype-score grad-text" style="font-size:30px">${v}</span><span class="small dim">/100</span></div>
@@ -692,7 +692,8 @@ function paintStreamers() {
       <div class="row">
         ${watching ? `<button class="btn danger" data-stop="${watching}">${ic("stop")} Stop</button>` : `<button class="btn primary" data-watch>${ic("play")} Watch now</button>`}
         <button class="btn" data-check title="Check if live">${ic("refresh")}</button>
-        <button class="btn" data-face title="Set facecam box for split layout">${ic("scan")} Facecam${s.facecam ? " ✓" : ""}</button>
+        <button class="btn" data-face title="Mark where the streamer's camera is">${ic("scan")} Facecam${s.facecam ? " ✓" : ""}</button>
+        <button class="btn" data-voice title="Forget the learned streamer voice and learn it again from the next clips">${ic("mic")} Reset voice</button>
       </div></div>`;
   }).join("");
   $$("[data-st]", el).forEach((card) => {
@@ -708,6 +709,10 @@ function paintStreamers() {
     if (st) st.onclick = async () => { await api(`/api/runs/${st.dataset.stop}/stop`, { method: "POST" }).catch(fail); toast("Stopping…"); setTimeout(async () => { S.streamers = await api("/api/streamers"); paintStreamers(); }, 2500); };
     $("[data-check]", card).onclick = async (e) => { const b = e.currentTarget; b.innerHTML = '<span class="spinner sm"></span>'; try { const r = await api(`/api/streamers/${id}/check`, { method: "POST" }); toast(r.live ? `${s.name} is LIVE: ${r.info}` : `${s.name} is offline`); } catch (er) { fail(er); } b.innerHTML = ic("refresh"); };
     $("[data-face]", card).onclick = () => facecamPicker(s);
+    $("[data-voice]", card).onclick = async () => {
+      if (!(await confirmBox(`Reset ${s.name}'s voice?`, "HYPECUT forgets the learned voice and learns it again from the next few clips. Use this if game dialogue was being muted instead of the streamer.", "Reset voice"))) return;
+      try { await api(`/api/streamers/${id}/voiceprint`, { method: "DELETE" }); toast("Voice reset — it will be re-learned from the next clips"); } catch (e) { fail(e); }
+    };
     $("[data-del]", card).onclick = async () => { if (await confirmBox(`Remove ${s.name}?`, "Their existing clips stay in your library.", "Remove", true)) { await api(`/api/streamers/${id}`, { method: "DELETE" }).catch(fail); S.streamers = S.streamers.filter((x) => x.id !== id); paintStreamers(); } };
   });
 }
@@ -1028,7 +1033,7 @@ function paintSettings() {
     html = `<div class="card section"><div class="row" style="align-items:flex-start;gap:26px">
       <div class="col" style="flex:1;min-width:260px;gap:16px">
         ${F.select("render.default_layout", "Default layout", [["auto", "Full screen 9:16, no facecam (recommended)"], ["blur", "Blurred background"], ["split", "Facecam on top + gameplay"]])}
-        ${F.select("render.audio_mode", "Audio", [["game_only", "Game audio only — remove the streamer's voice"], ["original", "Original (streamer + game)"], ["mute", "Muted"]], st.voice ? "Voice removal also removes in-game dialogue; engines, guns, music stay." : "Game-only needs the voice-removal model: pip install -r requirements-ml.txt")}
+        ${F.select("render.audio_mode", "Audio", [["game_only", "Remove the streamer's voice — keep game dialogue + sounds"], ["no_voices", "Remove all voices — game sounds only"], ["original", "Original (streamer + game)"], ["mute", "Muted"]], !st.voice ? "Needs the voice models: pip install -r requirements-ml.txt" : !st.speaker ? "Keeping game dialogue needs the speaker model (pip install -r requirements-ml.txt) — until then all voices are removed." : "Learns each streamer's voice over their first few clips, then mutes only them.")}
         ${F.toggle("render.captions", "Burn in word-by-word captions", st.whisper ? "Transcribed from the original audio, so they also work when the streamer's voice is removed." : "Needs the speech model: pip install -r requirements-ml.txt")}
         <div class="field-row">${F.color("render.caption_color", "Caption")}${F.color("render.highlight_color", "Active word")}${F.color("render.progress_color", "Accent / bar")}</div>
         ${F.range("render.caption_size", "Caption size", 50, 130, 1)}
@@ -1069,7 +1074,7 @@ function paintSettings() {
       <div class="field-row">${F.text("general.game", "Game", "Used in AI prompts and fallback titles")}${F.text("general.public_base_url", "Public base URL", "Only if you reach this dashboard via a domain/tunnel", "https://clips.example.com")}</div>
       ${saveBtn}
       <hr class="sep"><h4>System check</h4>
-      <div class="row">${[["ffmpeg", st.ffmpeg, "video engine"], ["ffmpeg text (libass)", st.ffmpeg_libass, "captions + hook text"], ["voice removal (demucs)", st.voice, "game-only audio"], ["faster-whisper", st.whisper, "captions + speech signal"], ["tesseract", st.tesseract, "in-game OCR"]].map(([n, ok, d]) => `<span class="badge ${ok ? "ok" : "warn"}">${ok ? ic("check") : ic("alert")} ${n} <span class="dim" style="font-weight:600">· ${d}</span></span>`).join("")}</div>
+      <div class="row">${[["ffmpeg", st.ffmpeg, "video engine"], ["ffmpeg text (libass)", st.ffmpeg_libass, "captions + hook text"], ["voice removal (demucs)", st.voice, "separates voices from game sounds"], ["speaker recognition (resemblyzer)", st.speaker, "keeps game dialogue, mutes only the streamer"], ["faster-whisper", st.whisper, "captions + speech signal"], ["tesseract", st.tesseract, "in-game OCR"]].map(([n, ok, d]) => `<span class="badge ${ok ? "ok" : "warn"}">${ok ? ic("check") : ic("alert")} ${n} <span class="dim" style="font-weight:600">· ${d}</span></span>`).join("")}</div>
     </div>`;
   } else if (t === "security") {
     html = `<div class="card section">

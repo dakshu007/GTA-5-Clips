@@ -317,7 +317,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "crf": 20,
         "preset": "veryfast",
         "hw_encode": True,
-        "audio_mode": "game_only",  # original | game_only (remove streamer voice) | mute
+        "audio_mode": "game_only",  # game_only (mute streamer, keep game dialogue) | no_voices | original | mute
     },
     "ai": {
         "enabled": True,

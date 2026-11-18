@@ -2,5 +2,7 @@
 faster-whisper>=1.0
 # Optional: OCR for in-game banners (also needs the tesseract binary)
 pytesseract>=0.3.10
-# Optional: "Game audio only" — removes the streamer's voice from clips (pulls in PyTorch, ~1 GB)
+# Optional: remove the streamer's voice from clips (pulls in PyTorch, ~1 GB)
 demucs>=4.0.1
+# Optional: tell the streamer's voice apart from in-game dialogue, so dialogue is kept
+resemblyzer>=0.1.4

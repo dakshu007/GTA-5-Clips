@@ -212,3 +212,14 @@ def test_parse_kick_pusher_config():
     assert chat.pusher_url(cfg) == "wss://ws-eu.pusher.com/app/abc?protocol=7&client=js&version=8.4.0&flash=false"
     with pytest.raises(ValueError):
         chat.parse_pusher_config({"data": {"connections": [{"provider": "centrifugo", "credentials": {}}]}})
+
+
+def test_facecam_hidden_in_blur_and_crop_but_used_in_split():
+    fc = {"x": 0.7, "y": 0.7, "w": 0.3, "h": 0.3}
+    blur = render.video_filter("blur", 1920, 1080, fc, 0.5)
+    crop = render.video_filter("crop", 1920, 1080, fc, 0.5)
+    split = render.video_filter("split", 1920, 1080, fc, 0.5)
+    assert "[camblur]" in blur and "[src]split=2[a][b]" in blur
+    assert "[camblur]" in crop and "[src]crop=" in crop
+    assert "[camblur]" not in split and "vstack" in split
+    assert "[camblur]" not in render.video_filter("blur", 1920, 1080, None, 0.5)

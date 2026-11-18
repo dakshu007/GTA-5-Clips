@@ -152,8 +152,35 @@ def _esc(path: Path | str) -> str:
     return p.replace(":", r"\:").replace("'", r"\'").replace(",", r"\,")
 
 
+def hide_cam_filter(src_w: int, src_h: int, facecam: dict) -> str:
+    """Filter chain [0:v] -> [src] that blurs the streamer's facecam out of the gameplay."""
+    pad = 0.01  # a little margin so the cam's border doesn't peek out
+    fx = max(0.0, float(facecam.get("x", 0)) - pad)
+    fy = max(0.0, float(facecam.get("y", 0)) - pad)
+    fw = min(1.0 - fx, float(facecam.get("w", 0.25)) + 2 * pad)
+    fh = min(1.0 - fy, float(facecam.get("h", 0.25)) + 2 * pad)
+    x, y = int(fx * src_w) // 2 * 2, int(fy * src_h) // 2 * 2
+    w, h = max(16, int(fw * src_w) // 2 * 2), max(16, int(fh * src_h) // 2 * 2)
+    w, h = min(w, src_w - x), min(h, src_h - y)
+    # shrink to a few pixels and blow back up = heavy, smooth blur
+    return (
+        f"[0:v]split=2[base][camsrc];"
+        f"[camsrc]crop={w}:{h}:{x}:{y},scale=12:12,scale={w}:{h}:flags=bilinear[camblur];"
+        f"[base][camblur]overlay={x}:{y}[src];"
+    )
+
+
 def video_filter(layout: str, src_w: int, src_h: int, facecam: dict | None, cx: float) -> str:
-    """Build the filtergraph that produces [v0] at 1080x1920."""
+    """Build the filtergraph that produces [v0] at 1080x1920.
+
+    In blur/crop layouts a configured facecam box is blurred out, so only gameplay shows.
+    """
+    if layout in ("blur", "crop") and facecam:
+        return hide_cam_filter(src_w, src_h, facecam) + _layout_filter(layout, src_w, src_h, facecam, cx).replace("[0:v]", "[src]", 1)
+    return _layout_filter(layout, src_w, src_h, facecam, cx)
+
+
+def _layout_filter(layout: str, src_w: int, src_h: int, facecam: dict | None, cx: float) -> str:
     if layout == "split" and facecam:
         fx, fy = float(facecam.get("x", 0)), float(facecam.get("y", 0))
         fw, fh = max(0.05, float(facecam.get("w", 0.25))), max(0.05, float(facecam.get("h", 0.25)))

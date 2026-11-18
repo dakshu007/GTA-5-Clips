@@ -436,10 +436,20 @@ const TABS = [["ready", "To review"], ["scheduled", "Scheduled"], ["posted", "Po
 async function pageReview(page) {
   if (S.params.get("tab")) S.reviewTab = S.params.get("tab");
   page.innerHTML = header("Review", "Approve with <span class='kbd'>A</span>, skip with <span class='kbd'>S</span>, move with <span class='kbd'>←</span> <span class='kbd'>→</span>",
-    `<button class="btn" id="retry-failed">${ic("refresh")} Retry failed</button><button class="btn" id="approve-all">${ic("check")} Approve all 70+</button>`) +
+    `<button class="btn" id="retry-failed">${ic("refresh")} Retry failed</button><button class="btn danger" id="delete-failed">${ic("trash")} Delete failed</button><button class="btn" id="approve-all">${ic("check")} Approve all 70+</button>`) +
     `<div class="tabs" id="tabs"></div><div id="grid"></div>`;
   S.clips = await api("/api/clips?limit=400");
   paintReviewGrid();
+  $("#delete-failed").onclick = async () => {
+    const failed = S.clips.filter((c) => c.status === "failed");
+    if (!failed.length) return toast("No failed clips");
+    if (!(await confirmBox("Delete all failed clips?", `${failed.length} failed clips and their files will be removed.`, "Delete", true))) return;
+    let n = 0;
+    for (const c of failed) { try { await api(`/api/clips/${c.id}`, { method: "DELETE" }); n++; } catch { /* busy — leave it */ } }
+    S.clips = await api("/api/clips?limit=400");
+    paintReviewGrid();
+    toast(`Deleted ${n} clip${n === 1 ? "" : "s"}`);
+  };
   $("#retry-failed").onclick = async () => {
     const failed = S.clips.filter((c) => c.status === "failed");
     if (!failed.length) return toast("No failed clips");
@@ -534,6 +544,7 @@ async function openReview(id, order) {
       <div class="review-side">
         <div class="row"><span class="badge ${c.status === "ready" ? "info" : c.status === "posted" ? "ok" : c.status === "failed" ? "err" : ""}">${esc(c.status)}</span>
           ${c.streamer ? `<span class="badge">${ic("user")} ${esc(c.streamer)}</span>` : ""}<span class="badge">${ic("clock")} ${fmtDur(c.duration)}</span>
+          ${{ game_only: `<span class="badge ok">🎮 game audio only</span>`, original_fallback: `<span class="badge warn" title="Voice removal is not installed or failed — see Settings → General → System check">⚠ streamer voice kept</span>`, mute: `<span class="badge">🔇 muted</span>` }[(c.ai || {}).audio_used] || ""}
           ${!c.streamer_permission ? `<span class="badge warn" title="Mark permission on the Streams page">${ic("lock")} no permission yet</span>` : ""}</div>
         <div class="verdict">
           <div class="row"><b>${ic("sparkles").replace("<svg", '<svg style="width:16px;height:16px;vertical-align:-3px;color:#a78bfa"')} ${ai.source === "claude" ? "AI editor" : "Auto-detected"}</b><div class="spacer"></div><span class="hype-score grad-text" style="font-size:30px">${v}</span><span class="small dim">/100</span></div>
@@ -991,7 +1002,7 @@ function paintSettings() {
       <div class="col" style="flex:1;min-width:260px;gap:16px">
         ${F.select("render.default_layout", "Default layout", [["auto", "Full screen 9:16, no facecam (recommended)"], ["blur", "Blurred background"], ["split", "Facecam on top + gameplay"]])}
         ${F.select("render.audio_mode", "Audio", [["game_only", "Game audio only — remove the streamer's voice"], ["original", "Original (streamer + game)"], ["mute", "Muted"]], st.voice ? "Voice removal also removes in-game dialogue; engines, guns, music stay." : "Game-only needs the voice-removal model: pip install -r requirements-ml.txt")}
-        ${F.toggle("render.captions", "Burn in word-by-word captions", "Only used with Original audio (captions transcribe the streamer's voice).")}
+        ${F.toggle("render.captions", "Burn in word-by-word captions", st.whisper ? "Transcribed from the original audio, so they also work when the streamer's voice is removed." : "Needs the speech model: pip install -r requirements-ml.txt")}
         <div class="field-row">${F.color("render.caption_color", "Caption")}${F.color("render.highlight_color", "Active word")}${F.color("render.progress_color", "Accent / bar")}</div>
         ${F.range("render.caption_size", "Caption size", 50, 130, 1)}
         ${F.range("render.caption_position", "Caption height", 0.35, 0.85, 0.01)}

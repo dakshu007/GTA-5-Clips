@@ -46,6 +46,8 @@ app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     resp = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache"  # always revalidate: updates show up immediately
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("Referrer-Policy", "same-origin")
     resp.headers.setdefault("X-Frame-Options", "DENY")
@@ -87,6 +89,9 @@ def _set_session(resp: JSONResponse, request: Request) -> JSONResponse:
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     html = (config.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    # cache-busting: after every update the browser must load the new CSS/JS, not an old copy
+    version = str(int(max((config.STATIC_DIR / f).stat().st_mtime for f in ("app.js", "styles.css"))))
+    html = html.replace("/static/styles.css", f"/static/styles.css?v={version}").replace("/static/app.js", f"/static/app.js?v={version}")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 

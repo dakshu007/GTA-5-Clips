@@ -43,6 +43,13 @@ Rules:
   situation, not the outcome ("He stole a cop car with the cop inside"), max 7 words, no emoji, no hashtags.
 - Never invent things that are not in the frames or transcript. No fake claims, no misleading clickbait.
 - Always credit the streamer by name in the caption.
+- Score virality on this fixed scale, so scores mean the same thing every time:
+  90-100: an instant must-watch — a clear, surprising payoff (insane stunt, chaos, hilarious fail or
+          reaction) that is visible in the frames, would make a stranger stop scrolling AND rewatch.
+  75-89: a strong clip with a clear moment and payoff, but not exceptional.
+  50-74: mildly interesting; only worth posting on a slow day.
+  0-49: no real moment (driving around, menus, talking, waiting) — keep=false.
+  Be strict: most stream moments are NOT 90+. Never inflate a score because chat or audio spiked.
 - Trim only dead time at the start or end; the clip must stay at least {min_len:.0f} seconds long.
 - Style: {style}"""
 

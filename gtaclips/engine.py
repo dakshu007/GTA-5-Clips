@@ -314,8 +314,12 @@ class Engine:
         t_step = time.time()
         audio_mode = str(render_cfg.get("audio_mode", "game_only"))
         words = c["words"]
-        # captions transcribe the streamer's voice — pointless when that voice is removed
-        want_captions = render_cfg.get("captions", True) and audio_mode == "original"
+        # Captions are always transcribed from the ORIGINAL audio, so they still work when the
+        # streamer's voice is removed from the soundtrack (the reaction becomes on-screen text).
+        want_captions = bool(render_cfg.get("captions", True))
+        if want_captions and not speech.available() and not getattr(self, "_warned_captions", False):
+            self._warned_captions = True
+            bus.activity("clip", "Captions need the speech model: run  pip install -r requirements-ml.txt  then restart", level="warn")
         if not words and speech.available() and want_captions:
             self.stage(clip_id, "Writing captions")
             try:
@@ -397,15 +401,17 @@ class Engine:
         if raw_dur - trim_start - trim_end_cut < min_len:
             trim_start = trim_end_cut = 0.0
         audio: Path | str | None = None
+        audio_used = "original"
         t_step = time.time()
         if audio_mode == "mute":
-            audio = "mute"
+            audio, audio_used = "mute", "mute"
         elif audio_mode == "game_only" and media.has_audio(raw):
+            audio_used = "original_fallback"  # unless voice removal succeeds below
             if voice.available():
                 self.stage(clip_id, "Removing streamer voice")
                 game_wav = clip_dir / "game_audio.wav"
                 if voice.remove_voice(raw, game_wav):
-                    audio = game_wav
+                    audio, audio_used = game_wav, "game_only"
                 else:
                     bus.activity("clip", f"Clip #{clip_id}: voice removal failed — kept original audio", level="warn", clip_id=clip_id)
             elif not getattr(self, "_warned_voice", False):
@@ -436,7 +442,7 @@ class Engine:
             clip.duration = out_dur
             clip.layout = layout
             if fresh_ai:
-                clip.ai = verdict
+                clip.ai = {**verdict, "audio_used": audio_used}
                 clip.virality = float(verdict.get("virality", 50))
                 clip.hook = hook
                 clip.title = verdict.get("title", "") if (not clip.title or rerun_ai) else clip.title
@@ -444,6 +450,7 @@ class Engine:
                 clip.hashtags = verdict.get("hashtags", []) if (not clip.hashtags or rerun_ai) else clip.hashtags
             else:
                 clip.hook = hook
+                clip.ai = {**(clip.ai or {}), "audio_used": audio_used}
             reject = ai_cfg.get("auto_reject", True) and fresh_ai and (
                 not verdict.get("keep", True) or clip.virality < float(ai_cfg.get("min_virality", 35))
             )

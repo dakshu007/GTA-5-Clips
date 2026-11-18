@@ -193,20 +193,11 @@ def video_filter(layout: str, src_w: int, src_h: int, facecam: dict | None, cx: 
     return _layout_filter(layout, src_w, src_h, facecam, cx)
 
 
-def crop_x(src_w: int, crop_w: int, cx: float, facecam: dict | None) -> int:
-    """Left edge of the full-height 9:16 window: centred on the action, but slid away
-    from the streamer's facecam so the camera is out of frame whenever possible."""
-    x = int(min(max(0, src_w * cx - crop_w / 2), src_w - crop_w))
-    if facecam:
-        cam_l = float(facecam.get("x", 0)) * src_w
-        cam_r = cam_l + float(facecam.get("w", 0)) * src_w
-        if x < cam_r and x + crop_w > cam_l:  # window overlaps the cam
-            right_of_cam = int(cam_r) + 2
-            left_of_cam = int(cam_l) - crop_w - 2
-            options = [o for o in (left_of_cam, right_of_cam) if 0 <= o <= src_w - crop_w]
-            if options:
-                x = min(options, key=lambda o: abs(o - x))
-    return x // 2 * 2
+def crop_x(src_w: int, crop_w: int) -> int:
+    """Left edge of the full-height 9:16 window: always the exact centre of the frame, so
+    the game's own HUD and subtitles stay centred. A facecam inside it is blurred out
+    (see hide_cam_filter) rather than moving the window."""
+    return max(0, (src_w - crop_w) // 2) // 2 * 2
 
 
 def _layout_filter(layout: str, src_w: int, src_h: int, facecam: dict | None, cx: float) -> str:
@@ -226,7 +217,7 @@ def _layout_filter(layout: str, src_w: int, src_h: int, facecam: dict | None, cx
     if layout == "crop":
         crop_w = int(src_h * 9 / 16 / 2) * 2
         crop_w = min(crop_w, src_w)
-        x = crop_x(src_w, crop_w, cx, facecam)
+        x = crop_x(src_w, crop_w)
         return f"[0:v]crop={crop_w}:{src_h}:{x}:0,scale={W}:{H},setsar=1[v0]"
     # blur (default)
     fg_h = 780
@@ -267,7 +258,7 @@ def render(
     if layout == "split" and not facecam:
         layout = "crop"
     src_w, src_h = media.video_size(raw)
-    cx = action_center(raw) if layout in ("crop", "split") else 0.5
+    cx = 0.5  # always centred: the game's HUD/subtitles are laid out around the middle
 
     shifted = [
         {"w": w["w"], "s": round(w["s"] - trim_start, 2), "e": round(w["e"] - trim_start, 2)}

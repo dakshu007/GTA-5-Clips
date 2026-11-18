@@ -225,11 +225,11 @@ def test_facecam_hidden_in_blur_and_crop_but_used_in_split():
     assert "[camblur]" not in render.video_filter("blur", 1920, 1080, None, 0.5)
 
 
-def test_crop_window_slides_away_from_facecam():
-    src_w, crop_w = 1920, 606
-    cam_right = {"x": 0.72, "y": 0.6, "w": 0.27, "h": 0.35}  # cam in bottom-right corner
-    x = render.crop_x(src_w, crop_w, 0.85, cam_right)  # action is near the cam
-    assert x + crop_w <= 0.72 * src_w  # window ends left of the cam
-    cam_left = {"x": 0.0, "y": 0.0, "w": 0.25, "h": 0.3}
-    assert render.crop_x(src_w, crop_w, 0.1, cam_left) >= 0.25 * src_w
-    assert render.crop_x(src_w, crop_w, 0.5, None) == (1920 // 2 - 303) // 2 * 2
+def test_full_screen_crop_is_exactly_centred():
+    for src_w, src_h in ((1920, 1080), (1280, 720), (2560, 1440)):
+        crop_w = int(src_h * 9 / 16 / 2) * 2
+        x = render.crop_x(src_w, crop_w)
+        left, right = x, src_w - (x + crop_w)
+        assert abs(left - right) <= 2, (src_w, left, right)
+    f = render.video_filter("crop", 1920, 1080, {"x": 0.7, "y": 0.6, "w": 0.3, "h": 0.4}, 0.5)
+    assert "crop=606:1080:656:0" in f and "[camblur]" in f  # centred + cam blurred, not dodged

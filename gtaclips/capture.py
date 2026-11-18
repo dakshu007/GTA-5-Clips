@@ -246,7 +246,7 @@ class LiveCapture:
         if not segs:
             raise RuntimeError("clip window is no longer in the buffer")
         lst = out.with_suffix(".txt")
-        lst.write_text("".join(f"file '{s.path.as_posix()}'\n" for s in segs))
+        lst.write_text("".join(f"file '{concat_quote(s.path)}'\n" for s in segs))
         ss = max(0.0, start - segs[0].t0)
         try:
             media.run_encode(lambda enc, dec: [
@@ -271,6 +271,11 @@ class LiveCapture:
 
     def cleanup(self) -> None:
         shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def concat_quote(path: Path) -> str:
+    """Path for a single-quoted entry in an ffmpeg concat list (a quote becomes '\\'')."""
+    return path.as_posix().replace("'", "'\\''")
 
 
 def cut_file(src: str | Path, start: float, end: float, out: Path) -> Path:

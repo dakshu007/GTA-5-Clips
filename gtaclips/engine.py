@@ -237,20 +237,29 @@ class Engine:
         self.enqueue_render(cid)
         return cid
 
-    def enqueue_render(self, clip_id: int, **opts) -> None:
+    def enqueue_render(self, clip_id: int, **opts) -> bool:
+        """Queue a render. Returns False if this clip is already queued/rendering."""
         with self._rq_lock:
-            if clip_id in self._render_queue and not opts:
-                return
+            if clip_id in self._render_queue:
+                return False
             self._render_queue.add(clip_id)
         self.render_pool.submit(self._render_job, clip_id, **opts)
+        return True
+
+    def is_busy(self, clip_id: int) -> bool:
+        with self._rq_lock:
+            return clip_id in self._render_queue
 
     def _clip_failed(self, clip_id: int, err: str) -> None:
+        d = None
         with db.session() as s:
             c = s.get(Clip, clip_id)
             if c:
                 c.status = "failed"
                 c.error = err[:1000]
                 d = c.to_dict()
+        if d is None:
+            return  # clip was deleted while it was being processed
         bus.publish("clip", clip=d)
         bus.activity("clip", f"Clip #{clip_id} failed: {err[:160]}", level="error", clip_id=clip_id)
 
@@ -440,7 +449,7 @@ class Engine:
             )
             has_posts = s.scalars(select(Post).where(Post.clip_id == clip_id, Post.status.in_(("scheduled", "posting", "posted")))).first()
             if has_posts:
-                clip.status = "scheduled" if has_posts.status != "posted" else "posted"
+                self.sync_clip_status(s, clip)
             else:
                 clip.status = "rejected" if reject else "ready"
             d = clip.to_dict()
@@ -496,6 +505,17 @@ class Engine:
                     return cand.astimezone(timezone.utc)
         return (now + timedelta(days=60)).astimezone(timezone.utc)
 
+    @staticmethod
+    def sync_clip_status(s, clip: Clip) -> None:
+        """scheduled if any post is pending, else posted if any went out, else ready."""
+        statuses = {p.status for p in s.scalars(select(Post).where(Post.clip_id == clip.id))}
+        if statuses & {"scheduled", "posting"}:
+            clip.status = "scheduled"
+        elif "posted" in statuses:
+            clip.status = "posted"
+        elif clip.status in ("scheduled", "posted"):
+            clip.status = "ready" if clip.video_path else "detected"
+
     def schedule_clip(self, clip_id: int, platforms: list[str], when: datetime | None = None) -> list[dict]:
         out = []
         with db.session() as s:
@@ -517,8 +537,8 @@ class Engine:
                 s.add(post)
                 s.flush()
                 out.append(post.to_dict())
-            if out or s.scalars(select(Post).where(Post.clip_id == clip_id, Post.status == "scheduled")).first():
-                clip.status = "scheduled"
+            s.flush()
+            self.sync_clip_status(s, clip)
             d = clip.to_dict()
         bus.publish("clip", clip=d)
         for p in out:
@@ -556,7 +576,9 @@ class Engine:
     def _publish_job(self, post_id: int) -> None:
         with db.session() as s:
             p = s.get(Post, post_id)
-            clip = s.get(Clip, p.clip_id)
+            clip = s.get(Clip, p.clip_id) if p else None
+            if not p or not clip:
+                return
             st = s.get(Streamer, clip.streamer_id) if clip.streamer_id else None
             post = p.to_dict()
             c = clip.to_dict()
@@ -582,6 +604,9 @@ class Engine:
                 res = publishers.instagram_upload(video, caption, public_url)
             with db.session() as s:
                 p = s.get(Post, post_id)
+                if p is None:  # deleted while uploading — recreate the record so it isn't lost
+                    p = Post(id=post_id, clip_id=c["id"], platform=post["platform"], scheduled_at=utcnow())
+                    s.add(p)
                 p.status = "posted"
                 p.posted_at = utcnow()
                 p.external_id = res["external_id"]
@@ -589,9 +614,8 @@ class Engine:
                 p.error = ""
                 post = p.to_dict()
                 clip = s.get(Clip, p.clip_id)
-                remaining = s.scalars(select(Post).where(Post.clip_id == clip.id, Post.status.in_(("scheduled", "posting")))).first()
-                if not remaining:
-                    clip.status = "posted"
+                s.flush()
+                self.sync_clip_status(s, clip)
                 c = clip.to_dict()
             bus.publish("post", post=post)
             bus.publish("clip", clip=c)
@@ -608,7 +632,16 @@ class Engine:
                 else:
                     p.status = "failed"
                 post = p.to_dict()
+                clip = s.get(Clip, p.clip_id)
+                if clip:
+                    s.flush()
+                    self.sync_clip_status(s, clip)
+                    c = clip.to_dict()
+                else:
+                    c = None
             bus.publish("post", post=post)
+            if c:
+                bus.publish("clip", clip=c)
             bus.activity("posted", f"{post['platform']} upload failed (try {post['attempts']}): {str(exc)[:160]}", level="error", post_id=post_id)
 
     # ------------------------------------------------------------ auto-watch

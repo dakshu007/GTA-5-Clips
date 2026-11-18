@@ -17,9 +17,9 @@ class MediaError(RuntimeError):
     pass
 
 
-def run(args: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
+def run(args: list[str], timeout: float | None = None, cwd: str | Path | None = None) -> subprocess.CompletedProcess:
     # own session: a Ctrl+C on the server must not kill a cut/render half way
-    proc = subprocess.run(args, capture_output=True, timeout=timeout, start_new_session=True)
+    proc = subprocess.run(args, capture_output=True, timeout=timeout, start_new_session=True, cwd=cwd)
     if proc.returncode != 0:
         tail = proc.stderr.decode(errors="replace")[-1500:]
         raise MediaError(f"{Path(args[0]).name} failed ({proc.returncode}): {tail}")
@@ -160,20 +160,20 @@ def h264_args(bitrate: str = "10M", crf: int = 20, preset: str = "veryfast", hw:
     return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-profile:v", "high", "-pix_fmt", "yuv420p"]
 
 
-def run_encode(build, timeout: float | None = None, **enc) -> subprocess.CompletedProcess:
+def run_encode(build, timeout: float | None = None, cwd: str | Path | None = None, **enc) -> subprocess.CompletedProcess:
     """Run ``build(encoder_args, decoder_args)`` with the Mac's video chip for decoding and
     encoding when available; if that fails, retry once fully on the CPU."""
     global _hw_broken, _hwdec_broken
     args = h264_args(**enc)
     dec = hw_decode_args() if args[1] == "h264_videotoolbox" else []
     try:
-        return run(build(args, dec), timeout=timeout)
+        return run(build(args, dec), timeout=timeout, cwd=cwd)
     except MediaError:
         if args[1] != "h264_videotoolbox" and not dec:
             raise
         _hw_broken = True  # don't keep trying broken hardware paths
         _hwdec_broken = True
-        return run(build(h264_args(**{**enc, "hw": False}), []), timeout=timeout)
+        return run(build(h264_args(**{**enc, "hw": False}), []), timeout=timeout, cwd=cwd)
 
 
 def snapshot(path: str | Path, at: float, out: str | Path, width: int = 1280) -> Path:

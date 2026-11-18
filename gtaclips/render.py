@@ -5,7 +5,7 @@ Layouts
 * ``blur``  – gameplay zoomed into the middle, blurred copy fills the frame
 * ``split`` – streamer facecam on top, gameplay below (needs a facecam box)
 * ``crop``  – full-screen 9:16 crop that follows where the action is
-* ``auto``  – split if the streamer has a facecam box, otherwise blur
+* ``auto``  – same as crop: full-screen gameplay, facecam kept out of frame
 
 Overlays: word-by-word karaoke captions, hook text for the first seconds,
 streamer credit, progress bar. Audio is loudness-normalised to -14 LUFS.
@@ -13,7 +13,9 @@ streamer credit, progress bar. Audio is loudness-normalised to -14 LUFS.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -147,6 +149,17 @@ def action_center(path: str | Path) -> float:
     return float(min(0.75, max(0.25, 0.5 + (c - 0.5) * 1.4)))
 
 
+def _fonts_dir() -> Path:
+    """Fonts copied into the data folder, so from clips/<id>/ they are simply ../../fonts."""
+    dest = config.DATA_DIR / "fonts"
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in config.FONTS_DIR.glob("*.otf"):
+        target = dest / f.name
+        if not target.exists():
+            shutil.copy2(f, target)
+    return dest
+
+
 def _esc(path: Path | str) -> str:
     p = str(path).replace("\\", "/")
     return p.replace(":", r"\:").replace("'", r"\'").replace(",", r"\,")
@@ -265,8 +278,16 @@ def render(
     ass_path.write_text(build_ass(shifted, dur, hook, credit, style), encoding="utf-8")
 
     graph = video_filter(layout, src_w, src_h, facecam, cx)
+    workdir = out.parent
     if media.has_filter("subtitles"):
-        graph += f";[v0]subtitles=filename='{_esc(ass_path)}':fontsdir='{_esc(config.FONTS_DIR)}'[v1]"
+        # ffmpeg runs inside the clip folder with *relative* paths, so folder names with
+        # quotes, colons or spaces can never break the filter syntax
+        fonts = _fonts_dir()
+        try:
+            rel_fonts = os.path.relpath(fonts, workdir)
+        except ValueError:  # different drive (Windows)
+            rel_fonts = str(fonts)
+        graph += f";[v0]subtitles=filename='{_esc(ass_path.name)}':fontsdir='{_esc(rel_fonts)}'[v1]"
         last = "v1"
     else:
         # ffmpeg built without libass: still make the clip, just without burned-in text
@@ -290,7 +311,7 @@ def render(
         return [media.FFMPEG, "-v", "error", "-nostdin", "-y", *dec, *span, "-i", str(raw), *a_in,
                 "-filter_complex", graph, "-map", f"[{last}]", "-map", a_map, *a_fx, "-r", "30", *enc, *tail]
 
-    media.run_encode(build, timeout=1800, bitrate="10M", crf=int(style.get("crf", 20)),
+    media.run_encode(build, timeout=1800, cwd=workdir, bitrate="10M", crf=int(style.get("crf", 20)),
                      preset=str(style.get("preset", "veryfast")), hw=bool(style.get("hw_encode", True)))
     return media.duration(out)
 

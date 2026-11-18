@@ -26,6 +26,9 @@ YT_UPLOAD = "https://www.googleapis.com/upload/youtube/v3/videos"
 YT_SCOPES = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly"
 
 
+_yt_token: dict = {"token": "", "exp": 0.0}
+
+
 def youtube_redirect_uri(base_url: str) -> str:
     return base_url.rstrip("/") + "/oauth/youtube/callback"
 
@@ -59,6 +62,7 @@ def youtube_exchange_code(code: str, redirect_uri: str) -> dict:
     if not tok.get("refresh_token"):
         raise PublishError("Google did not return a refresh token. Remove the app's access in your Google account and connect again.")
     db.update_settings("youtube", {"refresh_token": tok["refresh_token"]})
+    _yt_token.update(token=tok["access_token"], exp=time.time() + int(tok.get("expires_in", 3600)))
     try:
         ch = httpx.get(f"{YT_API}/channels", params={"part": "snippet", "mine": "true"},
                        headers={"Authorization": f"Bearer {tok['access_token']}"}, timeout=30).json()
@@ -67,9 +71,6 @@ def youtube_exchange_code(code: str, redirect_uri: str) -> dict:
     except Exception:  # channel name is cosmetic
         pass
     return tok
-
-
-_yt_token: dict = {"token": "", "exp": 0.0}
 
 
 def youtube_access_token() -> str:
@@ -127,7 +128,11 @@ def youtube_upload(video: Path, title: str, description: str, tags: list[str]) -
             up = c.put(init.headers["location"], content=f.read(), headers={"Content-Type": "video/mp4", "Content-Length": str(size)})
         if up.status_code not in (200, 201):
             raise PublishError(f"YouTube upload failed ({up.status_code}): {up.text[:400]}")
-        vid = up.json()["id"]
+        try:
+            vid = up.json()["id"]
+        except Exception:  # uploaded fine, response unreadable: don't retry (would duplicate)
+            log.warning("YouTube upload succeeded but the response had no video id")
+            return {"external_id": "", "url": ""}
     return {"external_id": vid, "url": f"https://youtube.com/shorts/{vid}"}
 
 
@@ -226,11 +231,18 @@ def instagram_upload(video: Path, caption: str, public_url: str | None = None) -
         pub = c.post(f"{base}/{uid}/media_publish", data={"creation_id": container, "access_token": token})
         if pub.status_code != 200:
             raise PublishError(f"Instagram publish failed: {_ig_error(pub)}")
-        media_id = pub.json()["id"]
+        # published — from here on nothing may raise, or the retry would post it twice
+        try:
+            media_id = pub.json()["id"]
+        except Exception:
+            return {"external_id": "", "url": ""}
         link = ""
-        info = c.get(f"{base}/{media_id}", params={"fields": "permalink", "access_token": token})
-        if info.status_code == 200:
-            link = info.json().get("permalink", "")
+        try:
+            info = c.get(f"{base}/{media_id}", params={"fields": "permalink", "access_token": token})
+            if info.status_code == 200:
+                link = info.json().get("permalink", "")
+        except Exception as exc:
+            log.warning("Instagram permalink lookup failed: %s", exc)
     return {"external_id": media_id, "url": link}
 
 

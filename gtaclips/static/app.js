@@ -443,8 +443,9 @@ async function pageReview(page) {
   $("#retry-failed").onclick = async () => {
     const failed = S.clips.filter((c) => c.status === "failed");
     if (!failed.length) return toast("No failed clips");
-    for (const c of failed) { try { await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: {} }); } catch (e) { fail(e); break; } }
-    toast(`Re-rendering ${failed.length} clips…`);
+    let n = 0;
+    for (const c of failed) { try { await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: {} }); n++; } catch { /* already busy — skip */ } }
+    toast(`Re-rendering ${n} clip${n === 1 ? "" : "s"}…`);
     S.reviewTab = "rendering,detected"; paintReviewGrid();
   };
   $("#approve-all").onclick = async () => {
@@ -580,20 +581,23 @@ async function openReview(id, order) {
   $("[data-close]", m).onclick = () => m.close();
   $("[data-prev]", m).onclick = () => go(-1);
   $("[data-next]", m).onclick = () => go(1);
+  let busy = false; // one action at a time: a held or double-tapped key must not stack windows
   const approve = async (now = false) => {
+    if (busy) return;
     const platforms = $$("[data-plat]", m).filter((x) => x.checked).map((x) => x.dataset.plat);
     if (!platforms.length) return toast("Pick at least one platform", "err");
     const when = $("[data-when]", m).value;
+    busy = true;
     try {
       await saveFields();
       const r = await api(`/api/clips/${c.id}/approve`, { method: "POST", body: { platforms, now, when: when ? new Date(when).toISOString() : null } });
       toast(now ? "Uploading now 🚀" : r.posts.length ? `Scheduled: ${r.posts.map((p) => `${PLAT[p.platform]} ${dayOf(p.scheduled_at)} ${timeOf(p.scheduled_at)}`).join(" · ")}` : "Already scheduled");
       go(1);
-    } catch (e) { fail(e); }
+    } catch (e) { fail(e); busy = false; }
   };
   $("[data-approve]", m).onclick = () => approve(false);
   $("[data-now]", m).onclick = () => approve(true);
-  $("[data-skip]", m).onclick = async () => { try { await api(`/api/clips/${c.id}/reject`, { method: "POST" }); toast("Skipped"); go(1); } catch (e) { fail(e); } };
+  $("[data-skip]", m).onclick = async () => { if (busy) return; busy = true; try { await api(`/api/clips/${c.id}/reject`, { method: "POST" }); toast("Skipped"); go(1); } catch (e) { fail(e); busy = false; } };
   $("[data-del]", m).onclick = async () => { if (await confirmBox("Delete clip?", "The video files are removed from disk.", "Delete", true)) { try { await api(`/api/clips/${c.id}`, { method: "DELETE" }); toast("Deleted"); go(1); } catch (e) { fail(e); } } };
   $$("[data-layout]", m).forEach((b) => (b.onclick = async () => { try { await saveFields(); await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: { layout: b.dataset.layout } }); toast("Re-rendering…"); m.close(); } catch (e) { fail(e); } }));
   const ra = $("[data-render-anyway]", m);
@@ -602,6 +606,7 @@ async function openReview(id, order) {
   $$("[data-f]", m).forEach((el) => el.addEventListener("change", () => saveFields().catch(fail)));
 
   function keys(e) {
+    if (e.repeat || !document.body.contains(m)) return;
     if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
     if (e.key === "a" || e.key === "A") { e.preventDefault(); approve(false); }
     else if (e.key === "s" || e.key === "S") { e.preventDefault(); $("[data-skip]", m).click(); }

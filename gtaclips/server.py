@@ -468,8 +468,7 @@ async def approve_clip(cid: int, request: Request) -> dict:
     if body.get("when"):
         try:
             when = datetime.fromisoformat(str(body["when"]).replace("Z", "+00:00"))
-            if when.tzinfo is None:
-                when = when.replace(tzinfo=timezone.utc)
+            when = when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when.astimezone(timezone.utc)
         except ValueError:
             raise HTTPException(400, "bad date")
     try:
@@ -479,8 +478,13 @@ async def approve_clip(cid: int, request: Request) -> dict:
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     if body.get("now"):
-        for p in posts:
-            engine.post_now(p["id"])
+        with db.session() as s:
+            pending = [p.id for p in s.scalars(select(Post).where(
+                Post.clip_id == cid, Post.platform.in_(platforms), Post.status == "scheduled"))]
+        for pid in pending:
+            engine.post_now(pid)
+        if not pending and not posts:
+            raise HTTPException(400, "Already posted (or uploading) on the selected platforms")
     return {"posts": posts}
 
 
@@ -488,6 +492,8 @@ async def approve_clip(cid: int, request: Request) -> dict:
 async def reject_clip(cid: int) -> dict:
     with db.session() as s:
         c = _clip_or_404(s, cid)
+        if s.scalars(select(Post).where(Post.clip_id == cid, Post.status == "posting")).first():
+            raise HTTPException(409, "This clip is uploading right now")
         for p in s.scalars(select(Post).where(Post.clip_id == cid, Post.status == "scheduled")):
             p.status = "cancelled"
         c.status = "rejected"
@@ -500,6 +506,8 @@ async def reject_clip(cid: int) -> dict:
 async def restore_clip(cid: int) -> dict:
     with db.session() as s:
         c = _clip_or_404(s, cid)
+        if engine.is_busy(cid):
+            raise HTTPException(409, "This clip is already being processed")
         c.status = "ready" if c.video_path else "detected"
         d = c.to_dict()
     if d["status"] == "detected":
@@ -514,8 +522,12 @@ async def rerender_clip(cid: int, request: Request) -> dict:
     layout = body.get("layout")
     if layout and layout not in ("auto", "split", "blur", "crop"):
         raise HTTPException(400, "bad layout")
+    if engine.is_busy(cid):
+        raise HTTPException(409, "This clip is already being processed — wait for it to finish")
     with db.session() as s:
         c = _clip_or_404(s, cid)
+        if s.scalars(select(Post).where(Post.clip_id == cid, Post.status == "posting")).first():
+            raise HTTPException(409, "This clip is uploading right now — wait for it to finish")
         c.status = "rendering"
         d = c.to_dict()
     bus.publish("clip", clip=d)
@@ -525,10 +537,12 @@ async def rerender_clip(cid: int, request: Request) -> dict:
 
 @app.delete("/api/clips/{cid}", dependencies=[Auth])
 async def delete_clip(cid: int) -> dict:
+    if engine.is_busy(cid):
+        raise HTTPException(409, "This clip is being processed — delete it when it's done")
     with db.session() as s:
         c = _clip_or_404(s, cid)
-        if s.scalars(select(Post).where(Post.clip_id == cid, Post.status == "posted")).first():
-            raise HTTPException(400, "Clip has been posted — reject it instead of deleting")
+        if s.scalars(select(Post).where(Post.clip_id == cid, Post.status.in_(("posted", "posting")))).first():
+            raise HTTPException(400, "Clip has been posted (or is uploading) — skip it instead of deleting")
         for p in s.scalars(select(Post).where(Post.clip_id == cid)):
             s.delete(p)
         s.delete(c)
@@ -607,8 +621,9 @@ async def cancel_post(pid: int) -> dict:
         p.status = "cancelled"
         d = p.to_dict()
         clip = s.get(Clip, p.clip_id)
-        if clip and not s.scalars(select(Post).where(Post.clip_id == clip.id, Post.status.in_(("scheduled", "posting", "posted")))).first():
-            clip.status = "ready"
+        if clip:
+            s.flush()
+            engine.sync_clip_status(s, clip)
             bus.publish("clip", clip=clip.to_dict())
     bus.publish("post", post=d)
     return d
@@ -620,6 +635,8 @@ async def retry_post(pid: int) -> dict:
         p = s.get(Post, pid)
         if not p:
             raise HTTPException(404)
+        if p.status not in ("failed", "cancelled"):
+            raise HTTPException(400, f"Post is {p.status} — nothing to retry")
         p.status = "scheduled"
         p.attempts = 0
         p.error = ""
@@ -636,8 +653,7 @@ async def reschedule_post(pid: int, request: Request) -> dict:
         when = datetime.fromisoformat(str(body["scheduled_at"]).replace("Z", "+00:00"))
     except (KeyError, ValueError):
         raise HTTPException(400, "bad date")
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
+    when = when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when.astimezone(timezone.utc)
     with db.session() as s:
         p = s.get(Post, pid)
         if not p or p.status != "scheduled":

@@ -62,9 +62,15 @@ class ChatListener:
         self.on_message(ts or time.time(), message_weight(text, self.hype_words) + extra, text)
 
     def stop(self) -> None:
-        self._stop.set()
+        """Safe to call from any thread."""
+        loop = getattr(self, "_loop", None)
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self._stop.set)
+        else:
+            self._stop.set()
 
     async def run(self) -> None:
+        self._loop = asyncio.get_running_loop()
         backoff = 2.0
         while not self._stop.is_set():
             try:

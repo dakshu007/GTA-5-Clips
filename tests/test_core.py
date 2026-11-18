@@ -198,3 +198,17 @@ def test_video_filter_layouts():
     assert "vstack" in render.video_filter("split", 1920, 1080, {"x": 0.7, "y": 0.7, "w": 0.3, "h": 0.3}, 0.5)
     assert "boxblur" in render.video_filter("blur", 1920, 1080, None, 0.5)
     assert render.video_filter("crop", 1920, 1080, None, 0.5).startswith("[0:v]crop=606:1080")
+
+
+# ---------------------------------------------------------------- Kick realtime config
+
+def test_parse_kick_pusher_config():
+    body = {"data": {"connections": [
+        {"credentials": {"url": "wss://realtime.example"}, "provider": "centrifugo"},
+        {"credentials": {"app_key": "abc", "cluster": "eu"}, "provider": "pusher"},
+    ]}}
+    cfg = chat.parse_pusher_config(body)
+    assert cfg == {"app_key": "abc", "cluster": "eu"}
+    assert chat.pusher_url(cfg) == "wss://ws-eu.pusher.com/app/abc?protocol=7&client=js&version=8.4.0&flash=false"
+    with pytest.raises(ValueError):
+        chat.parse_pusher_config({"data": {"connections": [{"provider": "centrifugo", "credentials": {}}]}})

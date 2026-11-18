@@ -136,40 +136,73 @@ class TwitchChat(ChatListener):
             self.emit(text, extra=3.0)
 
 
-class KickChat(ChatListener):
-    PUSHER = "wss://ws-us2.pusher.com/app/32cbd69e4b950bf97679?protocol=7&client=js&version=8.4.0&flash=false"
+KICK_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+# Fallback if Kick's realtime API can't be reached. Kick rotated its old key in Oct 2026.
+KICK_DEFAULT_PUSHER = {"app_key": "34bf7a0ff419a2a775b9", "cluster": "us2"}
 
+
+def pusher_url(cfg: dict) -> str:
+    return f"wss://ws-{cfg['cluster']}.pusher.com/app/{cfg['app_key']}?protocol=7&client=js&version=8.4.0&flash=false"
+
+
+def parse_pusher_config(data: dict) -> dict:
+    """Pick the Pusher entry out of Kick's realtime connection descriptor."""
+    for c in (data.get("data") or {}).get("connections") or []:
+        cred = c.get("credentials") or {}
+        if c.get("provider") == "pusher" and cred.get("app_key") and cred.get("cluster"):
+            return {"app_key": cred["app_key"], "cluster": cred["cluster"]}
+    raise ValueError("no pusher connection in Kick realtime config")
+
+
+class KickChat(ChatListener):
     def __init__(self, slug: str, on_message: OnMessage, hype_words: list[str]):
         super().__init__(on_message, hype_words)
         self.slug = slug.lower()
+        self.channel_id: int | None = None
         self.chatroom_id: int | None = None
+        self.pusher: dict | None = None
 
-    async def _resolve(self) -> int:
-        """Find the channel's chatroom id. kick.com sits behind Cloudflare, so plain HTTP
-        requests get 403 — reuse streamlink's Kick plugin, which carries the browser
-        cookies/headers it already obtained for the video stream (and can re-solve the
-        challenge with Chrome if they expired)."""
+    async def _resolve(self) -> tuple[int, int]:
+        """Channel id + chatroom id. kick.com sits behind Cloudflare, so plain HTTP requests
+        often get 403 — reuse streamlink's Kick plugin, which carries the browser cookies and
+        headers it already obtained for the video (and can re-solve the challenge with Chrome)."""
         errors = []
         try:
-            return await asyncio.to_thread(kick_chatroom_id_via_streamlink, self.slug)
+            return await asyncio.to_thread(kick_channel_via_streamlink, self.slug)
         except Exception as exc:
             errors.append(f"streamlink: {exc}")
         try:
-            async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}) as c:
+            async with httpx.AsyncClient(timeout=15, headers={"User-Agent": KICK_UA, "Accept": "application/json"}) as c:
                 r = await c.get(f"https://kick.com/api/v2/channels/{self.slug}")
                 r.raise_for_status()
-                return int(r.json()["chatroom"]["id"])
+                d = r.json()
+                return int(d["id"]), int(d["chatroom"]["id"])
         except Exception as exc:
             errors.append(f"direct: {exc}")
         raise RuntimeError("Kick blocked the chat lookup (Cloudflare). " + " | ".join(errors)[:300])
 
+    async def _pusher_config(self) -> dict:
+        """Ask Kick which Pusher app key/cluster its chat uses right now (they rotate it)."""
+        body = {"client": {"id": "hypecut", "type": "web"}, "capabilities": {"accepted_providers": [{"provider": "pusher"}]}}
+        url = f"https://web.kick.com/api/v1/realtime/channels/{self.channel_id}/chat/connection"
+        headers = {"User-Agent": KICK_UA, "Accept": "application/json", "Content-Type": "application/json",
+                   "Referer": "https://kick.com/", "Origin": "https://kick.com"}
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.post(url, json=body, headers=headers)
+                r.raise_for_status()
+                return parse_pusher_config(r.json())
+        except Exception as exc:
+            log.warning("Kick realtime config lookup failed (%s); using default chat key", exc)
+            return dict(KICK_DEFAULT_PUSHER)
+
     async def _run_once(self) -> None:
         if self.chatroom_id is None:
-            self.chatroom_id = await self._resolve()
-        async with websockets.connect(self.PUSHER, open_timeout=20) as ws:
+            self.channel_id, self.chatroom_id = await self._resolve()
+        if self.pusher is None or self.error.startswith("pusher 4001"):
+            self.pusher = await self._pusher_config()
+        async with websockets.connect(pusher_url(self.pusher), open_timeout=20) as ws:
             await ws.send(json.dumps({"event": "pusher:subscribe", "data": {"auth": "", "channel": f"chatrooms.{self.chatroom_id}.v2"}}))
-            self.connected = True
-            self.error = ""
             while not self._stop.is_set():
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -177,16 +210,27 @@ class KickChat(ChatListener):
                     continue
                 msg = json.loads(raw)
                 ev = msg.get("event", "")
-                if ev == "pusher:ping":
+                if ev == "pusher:error":
+                    err = msg.get("data") or {}
+                    if isinstance(err, str):
+                        err = json.loads(err or "{}")
+                    self.pusher = None  # fetch a fresh key on the next attempt
+                    raise RuntimeError(f"pusher {err.get('code')}: {err.get('message')}")
+                if ev == "pusher_internal:subscription_succeeded":
+                    self.connected = True
+                    self.error = ""
+                elif ev == "pusher:ping":
                     await ws.send(json.dumps({"event": "pusher:pong", "data": {}}))
                 elif ev.endswith("ChatMessageEvent"):
+                    self.connected = True
                     data = json.loads(msg.get("data") or "{}")
                     self.emit(str(data.get("content", "")))
                 elif ev.endswith(("SubscriptionEvent", "GiftedSubscriptionsEvent")):
                     self.emit("sub", extra=3.0)
 
 
-def kick_chatroom_id_via_streamlink(slug: str) -> int:
+def kick_channel_via_streamlink(slug: str) -> tuple[int, int]:
+    """(channel_id, chatroom_id) using streamlink's Cloudflare-cleared Kick session."""
     from streamlink import Streamlink
 
     session = Streamlink()
@@ -203,7 +247,8 @@ def kick_chatroom_id_via_streamlink(slug: str) -> int:
         res = get()
     if res.status_code != 200:
         raise RuntimeError(f"Kick API returned {res.status_code}")
-    return int(res.json()["chatroom"]["id"])
+    d = res.json()
+    return int(d["id"]), int(d["chatroom"]["id"])
 
 
 class YouTubeChat(ChatListener):

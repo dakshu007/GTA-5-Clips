@@ -249,8 +249,8 @@ class LiveCapture:
         lst.write_text("".join(f"file '{s.path.as_posix()}'\n" for s in segs))
         ss = max(0.0, start - segs[0].t0)
         try:
-            media.run_encode(lambda enc: [
-                media.FFMPEG, "-v", "error", "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
+            media.run_encode(lambda enc, dec: [
+                media.FFMPEG, "-v", "error", "-nostdin", "-y", *dec, "-f", "concat", "-safe", "0", "-i", str(lst),
                 "-ss", f"{ss:.3f}", "-t", f"{end - start:.3f}", *enc,
                 "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out),
             ], timeout=600, bitrate="16M", crf=18)
@@ -274,8 +274,8 @@ class LiveCapture:
 
 
 def cut_file(src: str | Path, start: float, end: float, out: Path) -> Path:
-    media.run_encode(lambda enc: [
-        media.FFMPEG, "-v", "error", "-nostdin", "-y", "-ss", f"{max(0.0, start):.3f}", "-i", str(src),
+    media.run_encode(lambda enc, dec: [
+        media.FFMPEG, "-v", "error", "-nostdin", "-y", *dec, "-ss", f"{max(0.0, start):.3f}", "-i", str(src),
         "-t", f"{end - start:.3f}", "-map", "0:v:0", "-map", "0:a:0?", *enc,
         "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out),
     ], timeout=900, bitrate="16M", crf=18)

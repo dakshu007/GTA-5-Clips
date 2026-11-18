@@ -180,6 +180,22 @@ def video_filter(layout: str, src_w: int, src_h: int, facecam: dict | None, cx: 
     return _layout_filter(layout, src_w, src_h, facecam, cx)
 
 
+def crop_x(src_w: int, crop_w: int, cx: float, facecam: dict | None) -> int:
+    """Left edge of the full-height 9:16 window: centred on the action, but slid away
+    from the streamer's facecam so the camera is out of frame whenever possible."""
+    x = int(min(max(0, src_w * cx - crop_w / 2), src_w - crop_w))
+    if facecam:
+        cam_l = float(facecam.get("x", 0)) * src_w
+        cam_r = cam_l + float(facecam.get("w", 0)) * src_w
+        if x < cam_r and x + crop_w > cam_l:  # window overlaps the cam
+            right_of_cam = int(cam_r) + 2
+            left_of_cam = int(cam_l) - crop_w - 2
+            options = [o for o in (left_of_cam, right_of_cam) if 0 <= o <= src_w - crop_w]
+            if options:
+                x = min(options, key=lambda o: abs(o - x))
+    return x // 2 * 2
+
+
 def _layout_filter(layout: str, src_w: int, src_h: int, facecam: dict | None, cx: float) -> str:
     if layout == "split" and facecam:
         fx, fy = float(facecam.get("x", 0)), float(facecam.get("y", 0))
@@ -197,7 +213,7 @@ def _layout_filter(layout: str, src_w: int, src_h: int, facecam: dict | None, cx
     if layout == "crop":
         crop_w = int(src_h * 9 / 16 / 2) * 2
         crop_w = min(crop_w, src_w)
-        x = int(min(max(0, src_w * cx - crop_w / 2), src_w - crop_w))
+        x = crop_x(src_w, crop_w, cx, facecam)
         return f"[0:v]crop={crop_w}:{src_h}:{x}:0,scale={W}:{H},setsar=1[v0]"
     # blur (default)
     fg_h = 780
@@ -221,15 +237,22 @@ def render(
     style: dict,
     trim_start: float = 0.0,
     trim_end: float | None = None,
+    audio: Path | str | None = None,
 ) -> float:
-    """Render the final vertical video. Returns its duration."""
+    """Render the final vertical video. Returns its duration.
+
+    ``audio``: None = the clip's own audio, a path = use that audio file instead
+    (e.g. game audio with the streamer's voice removed), "mute" = silence.
+    """
     src_dur = media.duration(raw)
     trim_start = max(0.0, min(trim_start, src_dur - 5))
     end = src_dur if trim_end is None else max(trim_start + 5, min(trim_end, src_dur))
     dur = end - trim_start
 
     if layout == "auto":
-        layout = "split" if facecam else "blur"
+        layout = "crop"
+    if layout == "split" and not facecam:
+        layout = "crop"
     src_w, src_h = media.video_size(raw)
     cx = action_center(raw) if layout in ("crop", "split") else 0.5
 
@@ -254,17 +277,21 @@ def render(
         graph += f";color=c={color}:s={W}x14:r=30:d={dur:.3f}[bar];[{last}][bar]overlay=x='-w+w*t/{dur:.3f}':y=H-14:eval=frame:shortest=1[v2]"
         last = "v2"
 
-    has_a = media.has_audio(raw)
-    args = [media.FFMPEG, "-v", "error", "-nostdin", "-y", "-ss", f"{trim_start:.3f}", "-t", f"{dur:.3f}", "-i", str(raw)]
-    if not has_a:
-        args += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
-    args += ["-filter_complex", graph, "-map", f"[{last}]", "-map", "0:a:0" if has_a else "1:a:0"]
-    if has_a:
-        args += ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
     tail = ["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-movflags", "+faststart", "-shortest", str(out)]
-    media.run_encode(lambda enc: args + ["-r", "30", *enc] + tail, timeout=1800,
-                     bitrate="10M", crf=int(style.get("crf", 20)), preset=str(style.get("preset", "veryfast")),
-                     hw=bool(style.get("hw_encode", True)))
+    span = ["-ss", f"{trim_start:.3f}", "-t", f"{dur:.3f}"]
+    if audio == "mute" or (audio is None and not media.has_audio(raw)):
+        a_in, a_map, a_fx = ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo"], "1:a:0", []
+    elif audio is not None:
+        a_in, a_map, a_fx = [*span, "-i", str(audio)], "1:a:0", ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
+    else:
+        a_in, a_map, a_fx = [], "0:a:0", ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
+
+    def build(enc: list[str], dec: list[str]) -> list[str]:
+        return [media.FFMPEG, "-v", "error", "-nostdin", "-y", *dec, *span, "-i", str(raw), *a_in,
+                "-filter_complex", graph, "-map", f"[{last}]", "-map", a_map, *a_fx, "-r", "30", *enc, *tail]
+
+    media.run_encode(build, timeout=1800, bitrate="10M", crf=int(style.get("crf", 20)),
+                     preset=str(style.get("preset", "veryfast")), hw=bool(style.get("hw_encode", True)))
     return media.duration(out)
 
 

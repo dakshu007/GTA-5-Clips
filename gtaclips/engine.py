@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
-from . import ai, auth, bus, capture, chat, config, db, media, publishers, render, signals, speech
+from . import ai, auth, bus, capture, chat, config, db, media, publishers, render, signals, speech, voice
 from .db import Clip, Post, Run, Streamer, utcnow
 
 log = logging.getLogger(__name__)
@@ -301,20 +301,29 @@ class Engine:
             else:
                 raise RuntimeError("raw clip is missing (live buffer expired)")
 
+        timings: dict[str, float] = {}
+        t_step = time.time()
+        audio_mode = str(render_cfg.get("audio_mode", "game_only"))
         words = c["words"]
-        if not words and speech.available() and render_cfg.get("captions", True):
+        # captions transcribe the streamer's voice — pointless when that voice is removed
+        want_captions = render_cfg.get("captions", True) and audio_mode == "original"
+        if not words and speech.available() and want_captions:
             self.stage(clip_id, "Writing captions")
             try:
                 words = speech.transcribe(raw, render_cfg.get("whisper_model", "base"))
             except Exception as exc:  # model download blocked, out of memory, ...
                 log.warning("transcription failed, rendering without captions: %s", exc)
                 bus.activity("clip", f"Captions skipped for #{clip_id}: speech model unavailable ({str(exc)[:80]})", level="warn")
+        if not want_captions:
+            words = []
         transcript = speech.words_to_text(words)
+        timings["captions"] = time.time() - t_step
         raw_dur = media.duration(raw)
         peak_off = max(0.0, c["peak"] - c["start"])
 
         streamer_name = st_d["name"] if st_d else (run_d.get("title") or "Streamer")
         verdict = c["ai"] if c["ai"] and not rerun_ai else None
+        t_step = time.time()
         if verdict is None:
             self.stage(clip_id, "AI editor")
             frames = render.ai_frames(raw, clip_dir, peak_off)
@@ -334,14 +343,12 @@ class Engine:
             layout = c["layout"]
         elif st_d and st_d.get("layout") not in (None, "", "auto"):
             layout = st_d["layout"]
-        elif verdict.get("layout") in ("blur", "split", "crop") and (verdict["layout"] != "split" or facecam):
-            layout = verdict["layout"]
         else:
             layout = render_cfg.get("default_layout", "auto")
         if layout == "split" and not facecam:
-            layout = "blur"
-        if layout == "auto":
-            layout = "split" if facecam else "blur"
+            layout = "crop"
+        if layout not in ("blur", "split", "crop"):
+            layout = "crop"  # auto: full-screen 9:16 gameplay, facecam kept out of frame
 
         hook = c["hook"] if (c["hook"] and not fresh_ai) else verdict.get("hook", "")
         purl = capture.platform_url(st_d["platform"], st_d["channel"], st_d["url"]) if st_d else ""
@@ -373,16 +380,37 @@ class Engine:
                 bus.activity("clip", f"AI skipped a clip: {verdict.get('reason', '')[:140]}", level="muted", clip_id=clip_id)
                 return
 
+        timings["ai"] = time.time() - t_step
         trim_start = float(verdict.get("trim_start", 0) or 0)
         trim_end_cut = float(verdict.get("trim_end", 0) or 0)
         # never let trimming push a clip below the minimum length the owner chose
         min_len = min(float(det_cfg.get("min_len", 15)), raw_dur)
         if raw_dur - trim_start - trim_end_cut < min_len:
             trim_start = trim_end_cut = 0.0
+        audio: Path | str | None = None
+        t_step = time.time()
+        if audio_mode == "mute":
+            audio = "mute"
+        elif audio_mode == "game_only" and media.has_audio(raw):
+            if voice.available():
+                self.stage(clip_id, "Removing streamer voice")
+                game_wav = clip_dir / "game_audio.wav"
+                if voice.remove_voice(raw, game_wav):
+                    audio = game_wav
+                else:
+                    bus.activity("clip", f"Clip #{clip_id}: voice removal failed — kept original audio", level="warn", clip_id=clip_id)
+            elif not getattr(self, "_warned_voice", False):
+                self._warned_voice = True
+                bus.activity("clip", "Game-only audio needs the voice-removal model: run  pip install -r requirements-ml.txt  then restart",
+                             level="warn")
+        timings["voice"] = time.time() - t_step
         tmp = clip_dir / "video.tmp.mp4"
+        t_step = time.time()
         self.stage(clip_id, "Rendering video")
         out_dur = render.render(raw, tmp, layout=layout, facecam=facecam, words=words, hook=hook, credit=credit,
-                                style=render_cfg, trim_start=trim_start, trim_end=raw_dur - trim_end_cut if trim_end_cut else None)
+                                style=render_cfg, trim_start=trim_start, trim_end=raw_dur - trim_end_cut if trim_end_cut else None,
+                                audio=audio)
+        timings["video"] = time.time() - t_step
         final = clip_dir / "video.mp4"
         tmp.replace(final)
         if tmp.with_suffix(".ass").exists():
@@ -417,8 +445,10 @@ class Engine:
                 clip.status = "rejected" if reject else "ready"
             d = clip.to_dict()
         bus.publish("clip", clip=d)
+        took = " · ".join(f"{k} {v:.0f}s" for k, v in timings.items() if v >= 1)
+        log.info("clip #%s rendered (%s)", clip_id, took)
         if d["status"] == "ready":
-            bus.activity("clip", f"Clip ready: {d['title'] or d['hook']}", clip_id=clip_id)
+            bus.activity("clip", f"Clip ready: {d['title'] or d['hook']}  ({took})", clip_id=clip_id)
         elif d["status"] == "rejected":
             bus.activity("clip", f"AI skipped a clip: {verdict.get('reason', '')[:140]}", level="muted", clip_id=clip_id)
 

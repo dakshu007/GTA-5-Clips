@@ -223,3 +223,13 @@ def test_facecam_hidden_in_blur_and_crop_but_used_in_split():
     assert "[camblur]" in crop and "[src]crop=" in crop
     assert "[camblur]" not in split and "vstack" in split
     assert "[camblur]" not in render.video_filter("blur", 1920, 1080, None, 0.5)
+
+
+def test_crop_window_slides_away_from_facecam():
+    src_w, crop_w = 1920, 606
+    cam_right = {"x": 0.72, "y": 0.6, "w": 0.27, "h": 0.35}  # cam in bottom-right corner
+    x = render.crop_x(src_w, crop_w, 0.85, cam_right)  # action is near the cam
+    assert x + crop_w <= 0.72 * src_w  # window ends left of the cam
+    cam_left = {"x": 0.0, "y": 0.0, "w": 0.25, "h": 0.3}
+    assert render.crop_x(src_w, crop_w, 0.1, cam_left) >= 0.25 * src_w
+    assert render.crop_x(src_w, crop_w, 0.5, None) == (1920 // 2 - 303) // 2 * 2

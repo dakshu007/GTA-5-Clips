@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
-from . import analytics, auth, bus, capture, config, db, media, publishers, speech
+from . import analytics, auth, bus, capture, config, db, media, publishers, speech, voice
 from .db import Clip, Post, Run, Streamer, utcnow
 from .engine import engine
 
@@ -693,6 +693,7 @@ async def get_settings(request: Request) -> dict:
             "tesseract": shutil.which("tesseract") is not None,
             "ffmpeg": shutil.which("ffmpeg") is not None,
             "ffmpeg_libass": media.has_filter("subtitles"),
+            "voice": voice.available(),
             "youtube_connected": bool(yt.get("refresh_token")),
             "youtube_channel": yt.get("channel_title", ""),
             "instagram_connected": bool(ig.get("user_id") and ig.get("access_token")),

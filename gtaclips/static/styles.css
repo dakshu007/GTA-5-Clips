@@ -371,7 +371,7 @@ a.stat:hover { border-color: var(--line-2); transform: translateY(-2px); }
 .modal.wide { width: min(1180px, 100%); }
 .modal h2 { margin: 0 0 6px; font-family: var(--display); font-size: 34px; letter-spacing: 1px; font-weight: 400; }
 @keyframes pop { from { transform: scale(0.96) translateY(10px); opacity: 0; } }
-.modal-x { position: absolute; top: 16px; right: 16px; }
+.modal-x { position: absolute; top: 14px; right: 14px; z-index: 10; }
 
 /* review modal */
 .review { display: grid; grid-template-columns: minmax(280px, 400px) 1fr; gap: 26px; position: relative; }

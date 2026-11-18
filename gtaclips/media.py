@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -67,6 +68,24 @@ def audio_pcm(path: str | Path, start: float | None = None, length: float | None
     return np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
 
 
+_hwaccels: set[str] | None = None
+_hwdec_broken = False
+
+
+def hw_decode_args() -> list[str]:
+    """On a Mac, decode video with the VideoToolbox chip (frees the CPU for everything else)."""
+    global _hwaccels
+    if _hwdec_broken or sys.platform != "darwin":
+        return []
+    if _hwaccels is None:
+        try:
+            out = subprocess.run([FFMPEG, "-hide_banner", "-hwaccels"], capture_output=True, timeout=30).stdout.decode(errors="replace")
+            _hwaccels = {line.strip() for line in out.splitlines()[1:] if line.strip()}
+        except Exception:
+            _hwaccels = set()
+    return ["-hwaccel", "videotoolbox"] if "videotoolbox" in _hwaccels else []
+
+
 def gray_frames(
     path: str | Path,
     fps: float = 2.0,
@@ -75,18 +94,29 @@ def gray_frames(
     length: float | None = None,
 ) -> np.ndarray:
     """Tiny grayscale frames, shape (n, h, w) uint8 — cheap input for motion analysis."""
+    global _hwdec_broken
     w, h = size
-    args = [FFMPEG, "-v", "error", "-nostdin"]
-    if start is not None:
-        args += ["-ss", f"{start:.3f}"]
-    args += ["-i", str(path)]
-    if length is not None:
-        args += ["-t", f"{length:.3f}"]
-    args += ["-an", "-vf", f"fps={fps},scale={w}:{h},format=gray", "-f", "rawvideo", "pipe:1"]
-    proc = subprocess.run(args, capture_output=True, timeout=600)
-    if proc.returncode != 0 or not proc.stdout:
+
+    def attempt(dec: list[str]) -> bytes:
+        args = [FFMPEG, "-v", "error", "-nostdin", *dec]
+        if start is not None:
+            args += ["-ss", f"{start:.3f}"]
+        args += ["-i", str(path)]
+        if length is not None:
+            args += ["-t", f"{length:.3f}"]
+        args += ["-an", "-vf", f"fps={fps},scale={w}:{h},format=gray", "-f", "rawvideo", "pipe:1"]
+        proc = subprocess.run(args, capture_output=True, timeout=600, start_new_session=True)
+        return proc.stdout if proc.returncode == 0 else b""
+
+    dec = hw_decode_args()
+    data = attempt(dec)
+    if not data and dec:
+        data = attempt([])
+        if data:
+            _hwdec_broken = True  # hardware decode doesn't work on this machine; stop trying
+    if not data:
         return np.zeros((0, h, w), dtype=np.uint8)
-    buf = np.frombuffer(proc.stdout, dtype=np.uint8)
+    buf = np.frombuffer(data, dtype=np.uint8)
     n = buf.size // (w * h)
     return buf[: n * w * h].reshape(n, h, w)
 
@@ -131,16 +161,19 @@ def h264_args(bitrate: str = "10M", crf: int = 20, preset: str = "veryfast", hw:
 
 
 def run_encode(build, timeout: float | None = None, **enc) -> subprocess.CompletedProcess:
-    """Run ``build(encoder_args)``; if the hardware encoder fails, retry once on the CPU."""
-    global _hw_broken
+    """Run ``build(encoder_args, decoder_args)`` with the Mac's video chip for decoding and
+    encoding when available; if that fails, retry once fully on the CPU."""
+    global _hw_broken, _hwdec_broken
     args = h264_args(**enc)
+    dec = hw_decode_args() if args[1] == "h264_videotoolbox" else []
     try:
-        return run(build(args), timeout=timeout)
+        return run(build(args, dec), timeout=timeout)
     except MediaError:
-        if args[1] != "h264_videotoolbox":
+        if args[1] != "h264_videotoolbox" and not dec:
             raise
-        _hw_broken = True  # don't keep trying a broken hardware encoder
-        return run(build(h264_args(**{**enc, "hw": False})), timeout=timeout)
+        _hw_broken = True  # don't keep trying broken hardware paths
+        _hwdec_broken = True
+        return run(build(h264_args(**{**enc, "hw": False}), []), timeout=timeout)
 
 
 def snapshot(path: str | Path, at: float, out: str | Path, width: int = 1280) -> Path:

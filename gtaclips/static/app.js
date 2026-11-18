@@ -544,7 +544,7 @@ async function openReview(id, order) {
         <label class="field">Title (YouTube) <input class="input" data-f="title" maxlength="100" value="${esc(c.title)}"><div class="counter" data-count="title"></div></label>
         <label class="field">Caption (Instagram + YouTube description) <textarea class="input" data-f="caption" rows="3">${esc(c.caption)}</textarea></label>
         <label class="field">Hashtags <input class="input" data-f="hashtags" value="${esc((c.hashtags || []).join(" "))}"></label>
-        <div class="row"><span class="small muted" style="font-weight:700">Layout</span><div class="seg" data-layouts>${["auto", "blur", "split", "crop"].map((l) => `<button data-layout="${l}" class="${c.layout === l ? "on" : ""}">${l}</button>`).join("")}</div>
+        <div class="row"><span class="small muted" style="font-weight:700">Layout</span><div class="seg" data-layouts>${[["crop", "Full screen"], ["blur", "Blurred bg"], ["split", "Cam on top"]].map(([l, n]) => `<button data-layout="${l}" class="${c.layout === l ? "on" : ""}">${n}</button>`).join("")}</div>
           <button class="btn sm ghost" data-reai title="Ask the AI editor again">${ic("wand")} Re-run AI</button></div>
         ${posted.length ? `<div class="col">${posted.map((p) => `<div class="row small"><span class="badge ${p.platform}">${PLAT[p.platform]}</span><span>${p.status === "posted" ? `posted ${ago(p.posted_at)} · ${fmtNum(p.views)} views` : `${p.status} · ${dayOf(p.scheduled_at)} ${timeOf(p.scheduled_at)}`}</span>${p.url ? `<a class="btn sm ghost" href="${esc(p.url)}" target="_blank" rel="noopener">${ic("ext")}</a>` : ""}</div>`).join("")}</div>` : ""}
         <hr class="sep" style="margin:4px 0">
@@ -595,7 +595,7 @@ async function openReview(id, order) {
   $("[data-now]", m).onclick = () => approve(true);
   $("[data-skip]", m).onclick = async () => { try { await api(`/api/clips/${c.id}/reject`, { method: "POST" }); toast("Skipped"); go(1); } catch (e) { fail(e); } };
   $("[data-del]", m).onclick = async () => { if (await confirmBox("Delete clip?", "The video files are removed from disk.", "Delete", true)) { try { await api(`/api/clips/${c.id}`, { method: "DELETE" }); toast("Deleted"); go(1); } catch (e) { fail(e); } } };
-  $$("[data-layout]", m).forEach((b) => (b.onclick = async () => { try { await saveFields(); await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: { layout: b.dataset.layout } }); toast(`Re-rendering as ${b.dataset.layout}…`); m.close(); } catch (e) { fail(e); } }));
+  $$("[data-layout]", m).forEach((b) => (b.onclick = async () => { try { await saveFields(); await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: { layout: b.dataset.layout } }); toast("Re-rendering…"); m.close(); } catch (e) { fail(e); } }));
   const ra = $("[data-render-anyway]", m);
   if (ra) ra.onclick = async () => { try { await api(`/api/clips/${c.id}/restore`, { method: "POST" }); toast("Rendering it now…"); m.close(); } catch (e) { fail(e); } };
   $("[data-reai]", m).onclick = async () => { try { await api(`/api/clips/${c.id}/rerender`, { method: "POST", body: { rerun_ai: true } }); toast("AI editor is taking another look…"); m.close(); } catch (e) { fail(e); } };
@@ -649,7 +649,7 @@ function paintStreamers() {
       <div class="opts">
         <label class="switch"><input type="checkbox" data-k="permission" ${s.permission ? "checked" : ""}><span class="track"></span>Permission</label>
         <label class="switch"><input type="checkbox" data-k="auto_watch" ${s.auto_watch ? "checked" : ""}><span class="track"></span>Auto-watch</label>
-        <label class="field">Layout<select class="input" data-k="layout">${["auto", "blur", "split", "crop"].map((l) => `<option ${s.layout === l ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        <label class="field">Layout<select class="input" data-k="layout">${[["auto", "Full screen, no cam"], ["blur", "Blurred background"], ["split", "Cam on top"]].map(([l, n]) => `<option value="${l}" ${(s.layout === "crop" ? "auto" : s.layout) === l ? "selected" : ""}>${n}</option>`).join("")}</select></label>
         <label class="field">Pays per 1K views<input class="input" type="number" min="0" step="0.05" data-k="cpm" value="${s.cpm || 0}"></label>
       </div>
       <div class="row">
@@ -984,8 +984,9 @@ function paintSettings() {
   } else if (t === "style") {
     html = `<div class="card section"><div class="row" style="align-items:flex-start;gap:26px">
       <div class="col" style="flex:1;min-width:260px;gap:16px">
-        ${F.select("render.default_layout", "Default layout", [["auto", "Auto (split if facecam set)"], ["blur", "Blur fill"], ["split", "Facecam + gameplay"], ["crop", "Full crop (follows action)"]])}
-        ${F.toggle("render.captions", "Burn in word-by-word captions", st.whisper ? "" : "Needs faster-whisper installed.")}
+        ${F.select("render.default_layout", "Default layout", [["auto", "Full screen 9:16, no facecam (recommended)"], ["blur", "Blurred background"], ["split", "Facecam on top + gameplay"]])}
+        ${F.select("render.audio_mode", "Audio", [["game_only", "Game audio only — remove the streamer's voice"], ["original", "Original (streamer + game)"], ["mute", "Muted"]], st.voice ? "Voice removal also removes in-game dialogue; engines, guns, music stay." : "Game-only needs the voice-removal model: pip install -r requirements-ml.txt")}
+        ${F.toggle("render.captions", "Burn in word-by-word captions", "Only used with Original audio (captions transcribe the streamer's voice).")}
         <div class="field-row">${F.color("render.caption_color", "Caption")}${F.color("render.highlight_color", "Active word")}${F.color("render.progress_color", "Accent / bar")}</div>
         ${F.range("render.caption_size", "Caption size", 50, 130, 1)}
         ${F.range("render.caption_position", "Caption height", 0.35, 0.85, 0.01)}
@@ -1025,7 +1026,7 @@ function paintSettings() {
       <div class="field-row">${F.text("general.game", "Game", "Used in AI prompts and fallback titles")}${F.text("general.public_base_url", "Public base URL", "Only if you reach this dashboard via a domain/tunnel", "https://clips.example.com")}</div>
       ${saveBtn}
       <hr class="sep"><h4>System check</h4>
-      <div class="row">${[["ffmpeg", st.ffmpeg, "video engine"], ["ffmpeg text (libass)", st.ffmpeg_libass, "captions + hook text"], ["faster-whisper", st.whisper, "captions + speech signal"], ["tesseract", st.tesseract, "in-game OCR"]].map(([n, ok, d]) => `<span class="badge ${ok ? "ok" : "warn"}">${ok ? ic("check") : ic("alert")} ${n} <span class="dim" style="font-weight:600">· ${d}</span></span>`).join("")}</div>
+      <div class="row">${[["ffmpeg", st.ffmpeg, "video engine"], ["ffmpeg text (libass)", st.ffmpeg_libass, "captions + hook text"], ["voice removal (demucs)", st.voice, "game-only audio"], ["faster-whisper", st.whisper, "captions + speech signal"], ["tesseract", st.tesseract, "in-game OCR"]].map(([n, ok, d]) => `<span class="badge ${ok ? "ok" : "warn"}">${ok ? ic("check") : ic("alert")} ${n} <span class="dim" style="font-weight:600">· ${d}</span></span>`).join("")}</div>
     </div>`;
   } else if (t === "security") {
     html = `<div class="card section">

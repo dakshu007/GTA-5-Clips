@@ -233,3 +233,22 @@ def test_full_screen_crop_is_exactly_centred():
         assert abs(left - right) <= 2, (src_w, left, right)
     f = render.video_filter("crop", 1920, 1080, {"x": 0.7, "y": 0.6, "w": 0.3, "h": 0.4}, 0.5)
     assert "crop=606:1080:656:0" in f and "[camblur]" in f  # centred + cam blurred, not dodged
+
+
+def test_back_to_back_moments_never_overlap():
+    cfg = dict(CFG, pre_roll=25, post_roll=15, min_len=40, max_len=55, cooldown=25, threshold=0.5)
+    rng = np.random.default_rng(7)
+    audio = -40 + rng.normal(0, 1.0, 400)
+    for peak in (100, 140, 175, 260):  # hype keeps coming
+        audio[peak:peak + 3] = -5
+        audio[peak + 3:peak + 25] = -25  # and stays loud for a while
+    found = []
+    an = signals.Analyzer(cfg, on_moment=found.append)
+    _feed(an, audio)
+    an.advance(400, final=True)
+    spans = sorted((m.start, m.end) for m in found)
+    assert len(spans) >= 2
+    for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
+        assert e1 <= s2, spans  # no shared footage
+    for s, e in spans:
+        assert e - s >= 39, spans

@@ -171,9 +171,11 @@ def run_encode(build, timeout: float | None = None, cwd: str | Path | None = Non
     except MediaError:
         if args[1] != "h264_videotoolbox" and not dec:
             raise
-        _hw_broken = True  # don't keep trying broken hardware paths
+        result = run(build(h264_args(**{**enc, "hw": False}), []), timeout=timeout, cwd=cwd)
+        # Only blame the hardware if the same job works on the CPU (a bad input fails both ways)
+        _hw_broken = True
         _hwdec_broken = True
-        return run(build(h264_args(**{**enc, "hw": False}), []), timeout=timeout, cwd=cwd)
+        return result
 
 
 def snapshot(path: str | Path, at: float, out: str | Path, width: int = 1280) -> Path:

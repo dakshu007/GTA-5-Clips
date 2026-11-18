@@ -100,7 +100,8 @@ def remove_voice(src: Path, out_wav: Path, timeout: float = 300.0) -> bool:
         return True
     if not available() or time.time() < _unhealthy_until:
         return False
-    if not _lock.acquire(timeout=5):
+    # Wait our turn (another clip may be separating); a stuck job trips _unhealthy_until.
+    if not _lock.acquire(timeout=timeout):
         return False
     result: dict = {}
 

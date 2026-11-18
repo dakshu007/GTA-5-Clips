@@ -71,7 +71,9 @@ def transcribe(path: str | Path, model_name: str = "base", start: float | None =
     audio = media.audio_pcm(path, start=start, length=length)
     if audio.size < 16000 * 0.5:
         return []
-    if not _lock.acquire(timeout=5):
+    # Wait our turn (another clip may be transcribing). A *stuck* job is caught by the
+    # unhealthy flag above, which the caller that timed out sets for 10 minutes.
+    if not _lock.acquire(timeout=timeout):
         log.warning("speech model busy/stuck — skipping captions for this clip")
         return []
     result: dict = {}

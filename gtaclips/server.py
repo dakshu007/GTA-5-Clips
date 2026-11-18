@@ -490,7 +490,7 @@ async def approve_clip(cid: int, request: Request) -> dict:
             engine.post_now(pid)
         if not pending and not posts:
             raise HTTPException(400, "Already posted (or uploading) on the selected platforms")
-    return {"posts": posts}
+    return {"posts": posts, "waiting_for_render": engine.is_busy(cid)}
 
 
 @app.post("/api/clips/{cid}/reject", dependencies=[Auth])

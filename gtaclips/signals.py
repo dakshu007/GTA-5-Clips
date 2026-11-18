@@ -47,6 +47,7 @@ class Moment:
     score: float
     signals: dict
     series: list = field(default_factory=list)
+    cap: float = float("inf")  # latest allowed end (where the next clip starts)
 
 
 class Timeline:
@@ -241,6 +242,8 @@ class Analyzer:
         self.on_moment = on_moment
         self.on_scores = on_scores
         self.last_trigger = -1e9
+        self.last_start = -1e9  # start of the most recent clip
+        self.last_end = -1e9  # end of the last clip already handed out
         self.scanned = 0  # seconds already scanned for peaks
         self.pending: list[Moment] = []
         self.has_chat = False
@@ -293,17 +296,26 @@ class Analyzer:
         cfg = self.cfg
         thr = float(cfg.get("threshold", 0.55))
         warm = float(cfg.get("warmup", 20))
-        cooldown = max(float(cfg.get("cooldown", 35)), float(cfg.get("min_len", 15)))  # no overlapping clips
+        cooldown = float(cfg.get("cooldown", 35))
+        pre, min_len = float(cfg.get("pre_roll", 12)), float(cfg.get("min_len", 15))
         n = len(self._combined)
         limit = n if final else n - self.LOOKAHEAD
         c = self._combined
         for t in range(self.scanned, max(self.scanned, limit)):
             if t < warm or c[t] < thr or t - self.last_trigger < cooldown:
                 continue
+            # clips never share footage: this clip may only start after the previous one
+            # (which still gets at least min_len) and after anything already emitted
+            new_start = max(0.0, t - pre)
+            if new_start < max(self.last_start + min_len, self.last_end):
+                continue
             lo, hi = max(0, t - self.LOOKAHEAD), min(n, t + self.LOOKAHEAD + 1)
             if c[t] < np.max(c[lo:hi]) or (t > lo and np.argmax(c[lo:hi]) + lo != t):
                 continue
+            for m in self.pending:  # the previous clip must end where this one starts
+                m.cap = min(m.cap, new_start)
             self.last_trigger = t
+            self.last_start = new_start
             self.pending.append(self._build_moment(t))
         self.scanned = max(self.scanned, limit)
         self._flush(final)
@@ -330,7 +342,7 @@ class Analyzer:
                 end += 1
             if end - m.start < min_len:
                 end = m.start + min_len
-            end = min(end, m.start + max_len)
+            end = min(end, m.start + max_len, m.cap)
             if end + 1 <= n or final:
                 m.end = float(min(end, n)) if final else float(end)
                 lo, hi = int(m.start), int(min(m.end, n))
@@ -340,5 +352,6 @@ class Analyzer:
                 m.end = end
         for m in ready:
             self.pending.remove(m)
+            self.last_end = max(self.last_end, m.end)
             if m.end - m.start >= 5:
                 self.on_moment(m)

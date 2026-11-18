@@ -83,12 +83,25 @@ function toast(msg, kind = "ok", ms = 3800) {
 }
 const fail = (e) => toast(e.message || String(e), "err", 6000);
 
+const modalStack = []; // open windows, top last: Esc and shortcuts only act on the top one
+const isTopModal = (m) => modalStack[modalStack.length - 1] === m;
+
 function modal(html, { wide = false, onClose } = {}) {
   const back = document.createElement("div");
   back.className = "modal-back";
   back.innerHTML = `<div class="modal ${wide ? "wide" : ""}" role="dialog" aria-modal="true" style="position:relative">${html}</div>`;
-  const close = () => { back.remove(); document.removeEventListener("keydown", onKey); onClose && onClose(); };
-  const onKey = (e) => { if (e.key === "Escape") close(); };
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    back.remove();
+    const i = modalStack.indexOf(back);
+    if (i >= 0) modalStack.splice(i, 1);
+    document.removeEventListener("keydown", onKey);
+    onClose && onClose();
+  };
+  const onKey = (e) => { if (e.key === "Escape" && isTopModal(back)) { e.stopImmediatePropagation(); close(); } };
+  modalStack.push(back);
   back.addEventListener("mousedown", (e) => { if (e.target === back) close(); });
   document.addEventListener("keydown", onKey);
   $("#modal-root").appendChild(back);
@@ -110,7 +123,7 @@ function confirmBox(title, text, okLabel = "Confirm", danger = false) {
 const S = {
   authed: false, configured: true, route: "dashboard", params: new URLSearchParams(),
   overview: null, clips: [], streamers: [], runs: [], posts: [], settings: null, status: null,
-  scores: {}, events: [], reviewTab: "ready", settingsTab: "accounts", es: null,
+  scores: {}, events: [], reviewTab: "ready", settingsTab: "accounts", es: null, renderSeq: 0,
 };
 
 // ------------------------------------------------------------------ auth screen
@@ -202,13 +215,16 @@ function parseRoute() {
   S.params = new URLSearchParams(query || "");
 }
 
+const stale = (seq) => seq !== undefined && seq !== S.renderSeq;
+
 async function render() {
   parseRoute();
   updateChrome();
   const page = $("#page");
   if (!page) return;
   const fn = PAGES[S.route] || PAGES.dashboard;
-  try { await fn(page); } catch (e) { if (S.authed) fail(e); }
+  const seq = ++S.renderSeq; // a slow page must not draw over the page the user moved to
+  try { await fn(page, seq); } catch (e) { if (S.authed && !stale(seq)) fail(e); }
   updateChrome();
 }
 
@@ -287,7 +303,7 @@ function handleEvent(m) {
 }
 
 // ================================================================== DASHBOARD
-async function pageDashboard(page) {
+async function pageDashboard(page, seq) {
   page.innerHTML = header("Command Center", "Live radar, fresh clips and everything happening right now",
     `<a class="btn" href="#/vod">${ic("upload")} Upload VOD</a><a class="btn primary" href="#/streams">${ic("radio")} Watch a stream</a>`) +
     `<div class="stats" id="stats"></div>
@@ -300,6 +316,7 @@ async function pageDashboard(page) {
        <div class="card"><div class="card-h"><h3>Activity</h3><div class="spacer"></div><span class="dot ok"></span><span class="small dim">live</span></div><div class="feed" id="feed"></div></div>
      </div>`;
   const [ov, clips] = await Promise.all([api("/api/overview"), api("/api/clips?limit=60")]);
+  if (stale(seq)) return;
   S.overview = ov; S.events = ov.events || []; S.clips = clips;
   paintDashboardDynamic();
   paintFeed();
@@ -433,12 +450,13 @@ function paintFresh() {
 // ================================================================== REVIEW
 const TABS = [["ready", "To review"], ["scheduled", "Scheduled"], ["posted", "Posted"], ["rendering,detected", "Processing"], ["rejected", "Skipped"], ["failed", "Failed"]];
 
-async function pageReview(page) {
+async function pageReview(page, seq) {
   if (S.params.get("tab")) S.reviewTab = S.params.get("tab");
   page.innerHTML = header("Review", "Approve with <span class='kbd'>A</span>, skip with <span class='kbd'>S</span>, move with <span class='kbd'>←</span> <span class='kbd'>→</span>",
     `<button class="btn" id="retry-failed">${ic("refresh")} Retry failed</button><button class="btn danger" id="delete-failed">${ic("trash")} Delete failed</button><button class="btn" id="approve-all">${ic("check")} Approve all 70+</button>`) +
     `<div class="tabs" id="tabs"></div><div id="grid"></div>`;
   S.clips = await api("/api/clips?limit=400");
+  if (stale(seq)) return;
   paintReviewGrid();
   $("#delete-failed").onclick = async () => {
     const failed = S.clips.filter((c) => c.status === "failed");
@@ -602,7 +620,7 @@ async function openReview(id, order) {
     try {
       await saveFields();
       const r = await api(`/api/clips/${c.id}/approve`, { method: "POST", body: { platforms, now, when: when ? new Date(when).toISOString() : null } });
-      toast(now ? "Uploading now 🚀" : r.posts.length ? `Scheduled: ${r.posts.map((p) => `${PLAT[p.platform]} ${dayOf(p.scheduled_at)} ${timeOf(p.scheduled_at)}`).join(" · ")}` : "Already scheduled");
+      toast(now ? (r.waiting_for_render ? "Will upload as soon as the new version finishes rendering" : "Uploading now 🚀") : r.posts.length ? `Scheduled: ${r.posts.map((p) => `${PLAT[p.platform]} ${dayOf(p.scheduled_at)} ${timeOf(p.scheduled_at)}`).join(" · ")}` : "Already scheduled");
       go(1);
     } catch (e) { fail(e); busy = false; }
   };
@@ -617,8 +635,10 @@ async function openReview(id, order) {
   $$("[data-f]", m).forEach((el) => el.addEventListener("change", () => saveFields().catch(fail)));
 
   function keys(e) {
-    if (e.repeat || !document.body.contains(m)) return;
-    if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+    if (e.repeat || !document.body.contains(m) || !isTopModal(m)) return;
+    const el = document.activeElement;
+    // typing in a text field must not trigger shortcuts; checkboxes/buttons are fine
+    if (el && (el.tagName === "TEXTAREA" || el.tagName === "SELECT" || (el.tagName === "INPUT" && !["checkbox", "radio", "range", "button"].includes(el.type)))) return;
     if (e.key === "a" || e.key === "A") { e.preventDefault(); approve(false); }
     else if (e.key === "s" || e.key === "S") { e.preventDefault(); $("[data-skip]", m).click(); }
     else if (e.key === "ArrowRight") go(1);
@@ -630,7 +650,7 @@ async function openReview(id, order) {
 }
 
 // ================================================================== STREAMS
-async function pageStreams(page) {
+async function pageStreams(page, seq) {
   page.innerHTML = header("Streams", "Paste any Twitch, Kick or YouTube channel. Auto-watch starts clipping the moment they go live.") +
     `<form class="add-bar" id="add-form"><input class="input big" name="url" placeholder="Paste a channel link — twitch.tv/name · kick.com/name · youtube.com/@name" required>
        <button class="btn primary lg" type="submit">${ic("plus")} Add streamer</button></form>
@@ -647,6 +667,7 @@ async function pageStreams(page) {
     } catch (err) { fail(err); }
   };
   [S.streamers, S.runs] = await Promise.all([api("/api/streamers"), api("/api/runs")]);
+  if (stale(seq)) return;
   paintStreamers(); paintRuns();
 }
 
@@ -736,7 +757,7 @@ function facecamPicker(s) {
 }
 
 // ================================================================== VOD LAB
-async function pageVod(page) {
+async function pageVod(page, seq) {
   page.innerHTML = header("VOD Lab", "Drop a past broadcast or paste a link — HYPECUT scans the whole thing and pulls the best moments.") +
     `<div class="grid g2" style="margin-bottom:22px">
       <label class="drop" id="drop"><input type="file" id="file" accept="video/*,.mkv,.ts,.flv" hidden>${ic("upload")}<h3>Drop a stream recording</h3><div class="muted">MP4 · MKV · MOV · TS · FLV · WEBM</div><div class="progress hidden" id="up-prog" style="margin:16px auto 0;max-width:320px"><i style="width:0"></i></div></label>
@@ -749,6 +770,7 @@ async function pageVod(page) {
       </div></div>
      <div class="card"><div class="card-h"><h3>Jobs</h3></div><div id="vod-runs" style="overflow-x:auto"></div></div>`;
   [S.streamers, S.runs] = await Promise.all([api("/api/streamers"), api("/api/runs?limit=60")]);
+  if (stale(seq)) return;
   const opts = `<option value="">No streamer (own footage)</option>` + S.streamers.map((s) => `<option value="${s.id}">${esc(s.name)} · ${PLAT[s.platform]}</option>`).join("");
   $("#vod-streamer").innerHTML = opts;
   paintVodRuns();
@@ -834,8 +856,9 @@ async function loadSchedule() {
 }
 
 // ================================================================== ANALYTICS / MONEY
-async function pageAnalytics(page) {
+async function pageAnalytics(page, seq) {
   const [ov, tune] = await Promise.all([api("/api/analytics"), api("/api/analytics/autotune")]);
+  if (stale(seq) || (seq === undefined && S.route !== "analytics")) return;
   const cur = ov.currency || "$";
   const posts = (ov.posts || {}).posted || 0;
   const maxS = Math.max(1, ...ov.by_streamer.map((s) => s.views));
@@ -880,12 +903,13 @@ async function pageAnalytics(page) {
 // ================================================================== SETTINGS
 const STABS = [["accounts", "Accounts", "link"], ["ai", "AI editor", "sparkles"], ["detection", "Detection", "sliders"], ["style", "Video style", "palette"], ["schedule", "Schedule", "calendar"], ["money", "Money", "dollar"], ["general", "General", "gear"], ["security", "Security", "shield"]];
 
-async function pageSettings(page) {
+async function pageSettings(page, seq) {
   if (S.params.get("tab")) S.settingsTab = S.params.get("tab");
   const yt = S.params.get("yt");
   if (yt === "ok") toast("YouTube connected ✓"); else if (yt === "error") toast("YouTube connection failed — check client ID/secret and redirect URI", "err", 7000); else if (yt === "signin") toast("Sign in first, then connect YouTube", "err");
   if (yt) history.replaceState(null, "", "#/settings?tab=accounts");
   S.settings = await api("/api/settings");
+  if (stale(seq)) return;
   page.innerHTML = header("Settings", "Everything is saved on your machine — keys never leave it except to the service they belong to") +
     `<div class="settings"><div class="subnav">${STABS.map(([k, l, i]) => `<button data-stab="${k}" class="${S.settingsTab === k ? "on" : ""}">${ic(i)} ${l}</button>`).join("")}</div><div id="spane"></div></div>`;
   $$("[data-stab]").forEach((b) => (b.onclick = () => { S.settingsTab = b.dataset.stab; $$("[data-stab]").forEach((x) => x.classList.toggle("on", x === b)); paintSettings(); }));
@@ -912,7 +936,10 @@ function collect(root) {
     const [section, ...rest] = el.dataset.path.split(".");
     let v;
     if (el.dataset.type === "bool") v = el.checked;
-    else if (el.dataset.type === "number") v = el.value === "" ? 0 : Number(el.value);
+    else if (el.dataset.type === "number") {
+      if (el.value.trim() === "" || !Number.isFinite(Number(el.value))) return; // empty = keep the saved value, never 0
+      v = Number(el.value);
+    }
     else if (el.dataset.type === "list") v = el.value.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
     else v = el.value;
     if (el.type === "password" && !v) return; // unchanged secret

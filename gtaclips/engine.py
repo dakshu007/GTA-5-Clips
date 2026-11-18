@@ -586,6 +586,12 @@ class Engine:
             clip = s.get(Clip, p.clip_id) if p else None
             if not p or not clip:
                 return
+            if self.is_busy(clip.id):
+                # a re-render (e.g. a new hook) is running: upload the NEW video, not the old one
+                p.status = "scheduled"
+                p.scheduled_at = utcnow() + timedelta(seconds=45)
+                bus.publish("post", post=p.to_dict())
+                return
             st = s.get(Streamer, clip.streamer_id) if clip.streamer_id else None
             post = p.to_dict()
             c = clip.to_dict()

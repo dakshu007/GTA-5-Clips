@@ -230,7 +230,7 @@ async def list_streamers() -> list[dict]:
         return out
 
 
-STREAMER_FIELDS = {"name", "platform", "channel", "url", "permission", "auto_watch", "layout", "facecam", "cpm", "notes"}
+STREAMER_FIELDS = {"name", "platform", "channel", "url", "permission", "auto_watch", "layout", "edit_style", "facecam", "cpm", "notes"}
 
 
 @app.post("/api/streamers", dependencies=[Auth])
@@ -271,6 +271,8 @@ async def edit_streamer(sid: int, request: Request) -> dict:
         for k, v in body.items():
             if k in STREAMER_FIELDS and k not in ("url", "platform", "channel"):
                 if k == "layout" and v not in ("auto", "split", "blur", "crop"):
+                    continue
+                if k == "edit_style" and v not in ("", "highlight", "troll"):
                     continue
                 if k == "cpm":
                     v = float(v or 0)
@@ -838,6 +840,16 @@ async def elevenlabs_voices() -> dict:
     except Exception as exc:
         raise HTTPException(400, f"ElevenLabs: {exc}")
     return {"voices": voices}
+
+
+@app.get("/api/elevenlabs/credits", dependencies=[Auth])
+async def elevenlabs_credits(refresh: bool = False) -> dict:
+    if not db.get_settings("elevenlabs").get("api_key"):
+        raise HTTPException(400, "Save your ElevenLabs API key first")
+    loop = asyncio.get_running_loop()
+    if refresh:
+        await loop.run_in_executor(None, lambda: trollkit.el_credits(refresh=True))
+    return await loop.run_in_executor(None, trollkit.estimate)
 
 
 @app.post("/api/settings/ai/test", dependencies=[Auth])

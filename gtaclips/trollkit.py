@@ -3,20 +3,27 @@
 Where a sound comes from, in order:
 1. Your folder  data/trollkit/sfx  and  data/trollkit/music  (files you have the rights to)
 2. ElevenLabs (if an API key is set): sound effects, narrator voice, background music
-3. Built-in effects synthesised with ffmpeg — always available, original, copyright-safe
+3. Built-in effects and beats synthesised here — always available, original, copyright-safe
 
 Everything generated is cached on disk, so each sound is only paid for once.
+
+ElevenLabs credits are spent carefully: in credit-saver mode (the default) only the narrator
+voice uses credits (on the half-price Flash model); sound effects and music come from the
+built-in kit. Every clip has a credit budget, and nothing is generated when the account
+would drop below the reserve you set.
 """
 from __future__ import annotations
 
 import hashlib
 import logging
 import re
+import threading
+import time
 from pathlib import Path
 
 import httpx
 
-from . import config, db, media
+from . import beats, config, db, media
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +53,14 @@ BUILTIN: dict[str, tuple[str, float]] = {
     "bonk": ("sine=f=180:d=0.35,volume='exp(-12*t)':eval=frame[a];anoisesrc=d=0.03:c=white:a=0.8[b];"
              "[a][b]amix=inputs=2:normalize=0", 0.35),
     "riser": ("aevalsrc=exprs='0.5*sin(2*PI*(200*t+250*t*t))*(t/1.6)':d=1.6:s=48000,vibrato=f=12:d=0.3", 1.6),
+    "cartoon_fall": ("aevalsrc=exprs='0.5*sin(2*PI*(1500*t-520*t*t))*min(1,t*30)*min(1,(1.1-t)*8)':d=1.1:s=48000,"
+                     "vibrato=f=9:d=0.25", 1.1),
+    "slide_whistle": ("aevalsrc=exprs='0.5*sin(2*PI*(450*t+700*t*t))*min(1,t*30)*min(1,(0.8-t)*10)':d=0.8:s=48000,"
+                      "vibrato=f=6:d=0.2", 0.8),
+    "glitch": ("anoisesrc=d=0.5:c=white:a=0.8,volume='if(lt(mod(t,0.07),0.035),1,0.05)':eval=frame,"
+               "bandpass=f=1800:width_type=h:w=2500,acrusher=bits=4:mix=0.8", 0.5),
+    "heartbeat": ("sine=f=55:d=1.0,volume='exp(-18*mod(t,0.5))*if(lt(mod(t,0.5),0.06),1,if(lt(mod(t,0.5),0.18),"
+                  "if(gt(mod(t,0.5),0.14),1,0.2),0.6))':eval=frame", 1.0),
 }
 
 # Keywords -> built-in, used when the AI asks for a sound we don't have and ElevenLabs is off
@@ -60,6 +75,10 @@ KEYWORDS = [
     (r"suspense|tension|uh.?oh|wait", "suspense"),
     (r"bonk|knock|thud|smack", "bonk"),
     (r"rise|riser|build", "riser"),
+    (r"fall|falling|drop.?down|plummet", "cartoon_fall"),
+    (r"slide|whistle|sneak", "slide_whistle"),
+    (r"glitch|error|lag|static|crash.?sound", "glitch"),
+    (r"heart|beat|nervous|tense", "heartbeat"),
 ]
 
 MUSIC_MOODS = {
@@ -131,6 +150,90 @@ def el_enabled() -> bool:
     return bool(cfg.get("enabled", True) and cfg.get("api_key"))
 
 
+def saver() -> bool:
+    return bool(el_settings().get("credit_saver", True))
+
+
+def tts_model() -> str:
+    cfg = el_settings()
+    return cfg.get("tts_model") or ("eleven_flash_v2_5" if cfg.get("credit_saver", True) else "eleven_multilingual_v2")
+
+
+# Rough credit costs (ElevenLabs pricing): multilingual voice 1 credit/char, Flash/Turbo about half;
+# sound effects 40 credits per second; music is the most expensive (estimate, refreshed after each track).
+SFX_PER_SEC = 40
+MUSIC_PER_SEC = 25
+
+
+def tts_cost(text: str) -> int:
+    per = 0.5 if any(k in tts_model() for k in ("flash", "turbo")) else 1.0
+    return int(len(text[:300]) * per + 0.999)
+
+
+_bal_lock = threading.Lock()
+_balance: dict = {"at": 0.0, "remaining": None, "limit": None, "used": None, "reset": None, "tier": "", "error": "", "key": ""}
+
+
+def el_credits(refresh: bool = False) -> dict:
+    """Credits left on the account (cached for 2 minutes). remaining is None when unknown."""
+    cfg = el_settings()
+    key = cfg.get("api_key") or ""
+    kid = hashlib.sha1(key.encode()).hexdigest()[:8]
+    with _bal_lock:
+        if not key:
+            return {"remaining": None, "limit": None, "used": None, "reset": None, "tier": "", "error": "no API key"}
+        if not refresh and _balance["key"] == kid and time.time() - _balance["at"] < 120:
+            return {k: v for k, v in _balance.items() if k not in ("at", "key")}
+    try:
+        r = httpx.get(f"{API}/user/subscription", headers={"xi-api-key": key}, timeout=20)
+        if r.status_code in (401, 403):
+            if "permission" in r.text.lower():
+                raise RuntimeError("this API key can't read the balance (turn on the 'User: read' permission for the key)")
+            raise RuntimeError("ElevenLabs rejected the API key — check it in Settings")
+        r.raise_for_status()
+        d = r.json()
+        used, limit = int(d.get("character_count") or 0), int(d.get("character_limit") or 0)
+        new = {"remaining": max(0, limit - used), "limit": limit, "used": used,
+               "reset": d.get("next_character_count_reset_unix"), "tier": str(d.get("tier") or ""), "error": ""}
+    except Exception as exc:
+        new = {"remaining": None, "limit": None, "used": None, "reset": None, "tier": "", "error": str(exc)[:200]}
+    with _bal_lock:
+        _balance.update(new, at=time.time(), key=kid)
+    return new
+
+
+def _spent(cost: int) -> None:
+    """Keep the cached balance roughly right between refreshes."""
+    with _bal_lock:
+        if _balance["remaining"] is not None:
+            _balance["remaining"] = max(0, _balance["remaining"] - int(cost))
+
+
+class Budget:
+    """Credits one clip may spend. Also keeps the account above the reserve."""
+
+    def __init__(self, limit: int | None = None):
+        cfg = el_settings()
+        self.limit = int(cfg.get("max_credits_per_clip", 150) if limit is None else limit)
+        self.reserve = int(cfg.get("reserve", 50) or 0)
+        self.spent = 0
+        self.skipped = 0
+
+    def allow(self, cost: int) -> bool:
+        if self.spent + cost > self.limit:
+            self.skipped += 1
+            return False
+        remaining = el_credits().get("remaining")
+        if remaining is not None and remaining - cost < self.reserve:
+            self.skipped += 1
+            return False
+        return True
+
+    def charge(self, cost: int) -> None:
+        self.spent += cost
+        _spent(cost)
+
+
 def _el_post(path: str, body: dict, params: dict | None = None, timeout: float = 120) -> bytes:
     cfg = el_settings()
     r = httpx.post(f"{API}{path}", params=params or {}, json=body,
@@ -153,9 +256,13 @@ def el_voices() -> list[dict]:
             for v in r.json().get("voices", [])]
 
 
+def _sfx_path(prompt: str, seconds: float | None) -> Path:
+    return cache_dir() / f"sfx_{_key(prompt, str(seconds), el_settings().get('sfx_model', ''))}.mp3"
+
+
 def el_sfx(prompt: str, seconds: float | None = None) -> Path:
     cfg = el_settings()
-    out = cache_dir() / f"sfx_{_key(prompt, str(seconds), cfg.get('sfx_model', ''))}.mp3"
+    out = _sfx_path(prompt, seconds)
     if out.exists() and out.stat().st_size > 500:
         return out
     body: dict = {"text": prompt[:400], "prompt_influence": 0.5}
@@ -167,6 +274,15 @@ def el_sfx(prompt: str, seconds: float | None = None) -> Path:
     return out
 
 
+def _tts_path(text: str) -> Path | None:
+    voice_id = el_settings().get("voice_id") or ""
+    return cache_dir() / f"tts_{_key(text, voice_id, tts_model())}.mp3" if voice_id else None
+
+
+def _cached(p: Path | None, min_size: int = 500) -> bool:
+    return bool(p and p.exists() and p.stat().st_size > min_size)
+
+
 def el_tts(text: str) -> Path:
     cfg = el_settings()
     voice_id = cfg.get("voice_id") or ""
@@ -176,7 +292,7 @@ def el_tts(text: str) -> Path:
             raise RuntimeError("no ElevenLabs voices available on this account")
         voice_id = voices[0]["voice_id"]
         db.update_settings("elevenlabs", {"voice_id": voice_id})
-    model = cfg.get("tts_model") or "eleven_multilingual_v2"
+    model = tts_model()
     out = cache_dir() / f"tts_{_key(text, voice_id, model)}.mp3"
     if out.exists() and out.stat().st_size > 500:
         return out
@@ -186,14 +302,23 @@ def el_tts(text: str) -> Path:
     return out
 
 
+def _music_path(mood: str) -> Path:
+    prompt = MUSIC_MOODS.get(mood, MUSIC_MOODS["funny"])
+    return cache_dir() / f"music_{mood}_{_key(prompt, el_settings().get('music_model', ''))}.mp3"
+
+
+def music_seconds(seconds: float) -> float:
+    return max(30.0, min(90.0, seconds))
+
+
 def el_music(mood: str, seconds: float) -> Path:
     """One cached track per mood (reused across clips, so it's only generated once)."""
     cfg = el_settings()
     prompt = MUSIC_MOODS.get(mood, MUSIC_MOODS["funny"])
-    out = cache_dir() / f"music_{mood}_{_key(prompt, cfg.get('music_model', ''))}.mp3"
+    out = _music_path(mood)
     if out.exists() and out.stat().st_size > 5000:
         return out
-    body: dict = {"prompt": prompt, "music_length_ms": int(max(30.0, min(90.0, seconds)) * 1000), "force_instrumental": True}
+    body: dict = {"prompt": prompt, "music_length_ms": int(music_seconds(seconds) * 1000), "force_instrumental": True}
     if cfg.get("music_model"):
         body["model_id"] = cfg["music_model"]
     out.write_bytes(_el_post("/music", body, params={"output_format": "mp3_44100_128"}, timeout=300))
@@ -202,7 +327,16 @@ def el_music(mood: str, seconds: float) -> Path:
 
 # ---------------------------------------------------------------- resolving what the plan asks for
 
-def resolve_sfx(want: str, seconds: float | None = None, allow_el: bool = True) -> Path:
+def beat(mood: str) -> Path:
+    """A built-in background beat for the mood (synthesised once, then cached)."""
+    mood = mood if mood in beats.MOODS else "funny"
+    out = cache_dir() / f"beat_v{beats.VERSION}_{mood}.wav"
+    if not out.exists():
+        beats.make(mood, out)
+    return out
+
+
+def resolve_sfx(want: str, seconds: float | None = None, allow_el: bool = True, budget: Budget | None = None) -> Path:
     """A sound for ``want``: a file name from your sfx folder, a built-in name, or a description."""
     want = (want or "").strip()
     stem = want.lower().removeprefix("library:").strip()
@@ -211,15 +345,24 @@ def resolve_sfx(want: str, seconds: float | None = None, allow_el: bool = True) 
             return p
     if stem in BUILTIN:
         return builtin(stem)
-    if allow_el and el_enabled() and el_settings().get("use_sfx", True) and want:
-        try:
-            return el_sfx(want, seconds)
-        except Exception as exc:  # out of credits, network...
-            log.warning("ElevenLabs sound effect failed, using built-in: %s", exc)
+    cfg = el_settings()
+    if allow_el and want and el_enabled() and cfg.get("use_sfx", True) and not cfg.get("credit_saver", True):
+        secs = max(0.5, min(5.0, float(seconds or 1.5)))
+        if _cached(_sfx_path(want, secs)):
+            return _sfx_path(want, secs)
+        cost = int(SFX_PER_SEC * secs)
+        if budget is None or budget.allow(cost):
+            try:
+                path = el_sfx(want, secs)
+                if budget:
+                    budget.charge(cost)
+                return path
+            except Exception as exc:  # out of credits, network...
+                log.warning("ElevenLabs sound effect failed, using built-in: %s", exc)
     return builtin(nearest_builtin(want))
 
 
-def resolve_music(mood: str, seconds: float) -> Path | None:
+def resolve_music(mood: str, seconds: float, budget: Budget | None = None) -> Path | None:
     if not mood or mood == "none":
         return None
     files = library("music")
@@ -227,19 +370,49 @@ def resolve_music(mood: str, seconds: float) -> Path | None:
     if by_mood or files:
         pick = (by_mood or files)
         return pick[int(hashlib.sha1(mood.encode()).hexdigest(), 16) % len(pick)]
-    if el_enabled() and el_settings().get("use_music", True):
-        try:
-            return el_music(mood, seconds)
-        except Exception as exc:
-            log.warning("ElevenLabs music failed, no music for this clip: %s", exc)
-    return None
+    cfg = el_settings()
+    if el_enabled() and cfg.get("use_music", True) and not cfg.get("credit_saver", True):
+        if _cached(_music_path(mood), 5000):
+            return _music_path(mood)
+        cost = int(MUSIC_PER_SEC * music_seconds(seconds))
+        if budget is None or budget.allow(cost):
+            try:
+                path = el_music(mood, seconds)
+                if budget:
+                    budget.charge(cost)
+                el_credits(refresh=True)  # music cost varies: read the real balance
+                return path
+            except Exception as exc:
+                log.warning("ElevenLabs music failed, using a built-in beat: %s", exc)
+    return beat(mood)
 
 
-def resolve_narration(text: str) -> Path | None:
+def resolve_narration(text: str, budget: Budget | None = None) -> Path | None:
     if not text.strip() or not (el_enabled() and el_settings().get("use_voice", True)):
         return None
+    if _cached(_tts_path(text)):
+        return _tts_path(text)
+    cost = tts_cost(text)
+    if budget is not None and not budget.allow(cost):
+        log.info("narration skipped: credit budget reached")
+        return None
     try:
-        return el_tts(text)
+        path = el_tts(text)
+        if budget:
+            budget.charge(cost)
+        return path
     except Exception as exc:
         log.warning("ElevenLabs narration failed, showing the line as text only: %s", exc)
         return None
+
+
+def estimate() -> dict:
+    """What the remaining credits buy, for the settings page."""
+    bal = el_credits()
+    per_line = int(55 * (0.5 if any(k in tts_model() for k in ("flash", "turbo")) else 1.0))
+    per_clip = min(int(el_settings().get("max_credits_per_clip", 150)), per_line * 3)
+    rem = bal.get("remaining")
+    reserve = int(el_settings().get("reserve", 50) or 0)
+    clips = max(0, (rem - reserve) // max(1, per_clip)) if rem is not None else None
+    return {**bal, "per_line": per_line, "per_clip": per_clip, "clips_left": clips,
+            "model": tts_model(), "saver": saver()}

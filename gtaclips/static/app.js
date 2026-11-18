@@ -698,6 +698,7 @@ function paintStreamers() {
         <label class="switch"><input type="checkbox" data-k="permission" ${s.permission ? "checked" : ""}><span class="track"></span>Permission</label>
         <label class="switch"><input type="checkbox" data-k="auto_watch" ${s.auto_watch ? "checked" : ""}><span class="track"></span>Auto-watch</label>
         <label class="field">Layout<select class="input" data-k="layout">${[["auto", "Full screen, no cam"], ["blur", "Blurred background"], ["split", "Cam on top"]].map(([l, n]) => `<option value="${l}" ${(s.layout === "crop" ? "auto" : s.layout) === l ? "selected" : ""}>${n}</option>`).join("")}</select></label>
+        <label class="field">Live edit<select class="input" data-k="edit_style">${[["", "Default (Settings)"], ["highlight", "🎬 Highlights"], ["troll", "😈 Troll edit"]].map(([v, n]) => `<option value="${v}" ${(s.edit_style || "") === v ? "selected" : ""}>${n}</option>`).join("")}</select></label>
         <label class="field">Pays per 1K views<input class="input" type="number" min="0" step="0.05" data-k="cpm" value="${s.cpm || 0}"></label>
       </div>
       <div class="row">
@@ -1032,16 +1033,20 @@ function paintSettings() {
       ${saveBtn}
     </div>
     <div class="card section" style="margin-top:18px">
-      <div class="acct"><div class="logo" style="background:linear-gradient(135deg,#111,#444)">${ic("mic").replace("currentColor", "#fff")}</div><div><h4>ElevenLabs — troll voice, sound effects, music</h4><div class="small">${st.elevenlabs_set ? `<span class="badge ok">${ic("check")} key saved${getP("elevenlabs.voice_name") ? " · voice: " + esc(getP("elevenlabs.voice_name")) : ""}</span>` : `<span class="badge warn">no key — built-in sound effects only</span>`}</div></div></div>
-      <div class="help">Used by <b>Troll edit</b>: the narrator voice, custom meme sound effects and background music. Everything generated is cached, so each sound is only paid for once. Without a key, troll edits still work with built-in sound effects and on-screen narrator text.</div>
+      <div class="acct"><div class="logo" style="background:linear-gradient(135deg,#111,#444)">${ic("mic").replace("currentColor", "#fff")}</div><div><h4>ElevenLabs — troll voice, sound effects, music</h4><div class="small">${st.elevenlabs_set ? `<span class="badge ok">${ic("check")} key saved${getP("elevenlabs.voice_name") ? " · voice: " + esc(getP("elevenlabs.voice_name")) : ""}</span>` : `<span class="badge warn">no key — built-in sounds + beats only</span>`}</div></div></div>
+      <div class="help">Used by <b>Troll edit</b>: the narrator voice, custom meme sound effects and background music. Everything generated is cached, so each sound is only paid for once. Without a key, troll edits still work with built-in sound effects, built-in background beats and on-screen narrator text.</div>
       ${F.toggle("elevenlabs.enabled", "Use ElevenLabs")}
       <div class="field-row">${F.secret("elevenlabs.api_key", "API key", "elevenlabs.io → Developers → API keys")}
         <label class="field">Narrator voice <span class="hint">Load your voices, then pick one</span>
           <div class="row" style="flex-wrap:nowrap"><select class="input" id="el-voice"><option value="${esc(getP("elevenlabs.voice_id"))}">${esc(getP("elevenlabs.voice_name") || (getP("elevenlabs.voice_id") ? getP("elevenlabs.voice_id") : "First voice on the account"))}</option></select>
           <button class="btn sm" id="el-load" type="button">${ic("refresh")} Load</button></div></label></div>
+      ${st.elevenlabs_set ? `<div class="credits" id="el-credits"><div class="row"><b>Credits</b><div class="spacer"></div><button class="btn sm ghost" id="el-refresh" type="button">${ic("refresh")} Refresh</button></div><div class="small muted" id="el-credits-body"><span class="spinner sm"></span> checking balance…</div></div>` : ""}
+      ${F.toggle("elevenlabs.credit_saver", "Credit saver (recommended for small balances)")}
+      <div class="help" style="margin-top:-4px">Credit saver: only the narrator voice uses credits, on the half-price Flash voice model. Sound effects and background music come from HYPECUT's built-in kit (free, original). Turn it off to also generate ElevenLabs sound effects (~40 credits per second) and music (the most expensive).</div>
+      <div class="field-row">${F.num("elevenlabs.max_credits_per_clip", "Max credits per clip", "narrator lines are ~25–55 each", "1", "0")}${F.num("elevenlabs.reserve", "Keep at least", "credits never spent", "1", "0")}</div>
       <div class="row">${F.toggle("elevenlabs.use_voice", "Narrator voice")}${F.toggle("elevenlabs.use_sfx", "Sound effects")}${F.toggle("elevenlabs.use_music", "Background music")}</div>
       <details class="help"><summary>Advanced: model names</summary>Leave empty for ElevenLabs' defaults. ElevenLabs is retiring <code>eleven_text_to_sound_v2</code> (Mar 2027) and <code>music_v1</code> (Jan 2027) — when that happens, put the newer model names from their docs here.
-        <div class="field-row" style="margin-top:10px">${F.text("elevenlabs.tts_model", "Voice model", "", "eleven_multilingual_v2")}${F.text("elevenlabs.sfx_model", "Sound effects model")}${F.text("elevenlabs.music_model", "Music model")}</div></details>
+        <div class="field-row" style="margin-top:10px">${F.text("elevenlabs.tts_model", "Voice model", "", getP("elevenlabs.credit_saver") === false ? "eleven_multilingual_v2" : "eleven_flash_v2_5")}${F.text("elevenlabs.sfx_model", "Sound effects model")}${F.text("elevenlabs.music_model", "Music model")}</div></details>
       <div class="help"><b>Your own sounds:</b> drop audio files you have the rights to into<br><code>${esc(st.trollkit_sfx)}</code> (${st.trollkit_counts.sfx} files) and <code>${esc(st.trollkit_music)}</code> (${st.trollkit_counts.music} files). Name music files after a mood (e.g. <code>phonk_1.mp3</code>, <code>funny_beat.mp3</code>) and the troll director will pick them.</div>
       ${saveBtn}
     </div>`;
@@ -1171,6 +1176,22 @@ function paintSettings() {
     } catch (er) { fail(er); }
     b.disabled = false;
   });
+  const credBody = $("#el-credits-body", pane);
+  const loadCredits = async (refresh) => {
+    if (!credBody) return;
+    try {
+      const r = await api(`/api/elevenlabs/credits${refresh ? "?refresh=true" : ""}`);
+      if (!credBody.isConnected) return;
+      if (r.remaining == null) { credBody.innerHTML = `<span class="badge warn">balance unknown</span> ${esc(r.error || "")}`; return; }
+      const pct = r.limit ? Math.max(0, Math.min(100, (r.remaining / r.limit) * 100)) : 0;
+      credBody.innerHTML = `<div class="credit-bar"><i style="width:${pct.toFixed(1)}%"></i></div>
+        <div class="row" style="margin-top:6px"><span><b class="mono">${Number(r.remaining).toLocaleString()}</b> of ${Number(r.limit).toLocaleString()} left${r.tier ? ` · ${esc(r.tier)}` : ""}</span><div class="spacer"></div>
+        <span>≈ <b>${r.clips_left}</b> troll clips with voice (${r.per_clip} credits each, ${esc(r.model)})</span></div>
+        ${r.reset ? `<div class="dim">Refills ${new Date(r.reset * 1000).toLocaleDateString()}</div>` : ""}`;
+    } catch (er) { if (credBody.isConnected) credBody.innerHTML = `<span class="badge warn">${esc(er.message || "could not read the balance")}</span>`; }
+  };
+  loadCredits(false);
+  on("#el-refresh", () => { credBody.innerHTML = '<span class="spinner sm"></span> checking balance…'; loadCredits(true); });
   const voiceSel = $("#el-voice", pane);
   if (voiceSel) voiceSel.onchange = async () => {
     const opt = voiceSel.selectedOptions[0];

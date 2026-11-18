@@ -58,6 +58,7 @@ class Streamer(Base):
     permission: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_watch: Mapped[bool] = mapped_column(Boolean, default=False)
     layout: Mapped[str] = mapped_column(String(20), default="auto")  # auto | split | blur | crop
+    edit_style: Mapped[str] = mapped_column(String(20), default="")  # "" (use default) | highlight | troll
     facecam: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {x,y,w,h} as 0..1 fractions
     cpm: Mapped[float] = mapped_column(Float, default=0.0)  # $ paid per 1k views (campaign / deal)
     notes: Mapped[str] = mapped_column(Text, default="")
@@ -75,6 +76,7 @@ class Streamer(Base):
             "permission": self.permission,
             "auto_watch": self.auto_watch,
             "layout": self.layout,
+            "edit_style": self.edit_style or "",
             "facecam": self.facecam,
             "cpm": self.cpm,
             "notes": self.notes,
@@ -250,7 +252,22 @@ def init(db_url: str | None = None) -> None:
             cur.close()
 
         Base.metadata.create_all(_engine)
+        _migrate(_engine)
         _SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
+
+
+# Columns added after the first release: create_all() doesn't add columns to existing tables.
+_ADDED_COLUMNS = [
+    ("streamers", "edit_style", "VARCHAR(20) NOT NULL DEFAULT ''"),
+]
+
+
+def _migrate(engine) -> None:
+    with engine.begin() as conn:
+        for table, column, ddl in _ADDED_COLUMNS:
+            have = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+            if have and column not in have:
+                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 @contextmanager
@@ -371,6 +388,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "tts_model": "",
         "sfx_model": "",
         "music_model": "",
+        "credit_saver": True,  # only the narrator uses credits (Flash model); sfx + music are built-in
+        "max_credits_per_clip": 150,
+        "reserve": 50,  # never spend the account below this
     },
     "money": {
         "youtube_rpm": 0.06,  # $ per 1k Shorts views (own-channel ad share estimate)

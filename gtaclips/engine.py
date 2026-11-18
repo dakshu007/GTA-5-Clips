@@ -287,22 +287,30 @@ class Engine:
 
     @staticmethod
     def _troll_fx(plan: dict, duration: float) -> dict:
-        """Turn a troll plan into render inputs: resolve every sound effect, narrator line and the music."""
-        sfx, narration = [], []
+        """Turn a troll plan into render inputs: resolve every sound effect, narrator line and the music.
+
+        ElevenLabs credits are spent within the per-clip budget: narration first (it matters most),
+        then music, then sound effects. Anything over budget falls back to the built-in kit.
+        """
+        budget = trollkit.Budget()
+        narration = []
         for ev in plan["events"]:
-            if ev["type"] == "sfx":
-                sfx.append((trollkit.resolve_sfx(ev["sound"] or "boom", ev["dur"]), ev["t"], 0.85))
-            elif ev["type"] == "narration":
-                path = trollkit.resolve_narration(ev["text"])
+            if ev["type"] == "narration":
+                path = trollkit.resolve_narration(ev["text"], budget=budget)
                 if path:
                     narration.append((path, ev["t"], ev["text"]))
+        music = trollkit.resolve_music(plan.get("music_mood", "none"), duration + 5, budget=budget)
+        sfx = [(trollkit.resolve_sfx(ev["sound"] or "boom", ev["dur"], budget=budget), ev["t"], 0.85)
+               for ev in plan["events"] if ev["type"] == "sfx"]
         return {
             "slowmo": plan["slowmo"],
             "events": plan["events"],
             "ending_text": plan.get("ending_text", ""),
             "sfx": sfx,
             "narration": narration,
-            "music": trollkit.resolve_music(plan.get("music_mood", "none"), duration + 5),
+            "music": music,
+            "credits": budget.spent,
+            "credits_skipped": budget.skipped,
         }
 
     def _render(self, clip_id: int, layout_override: str | None, rerun_ai: bool, style_override: str | None = None) -> None:
@@ -427,7 +435,7 @@ class Engine:
 
         # ---- troll edit: AI director plans zooms/sfx/stickers/narration, then we gather the sounds
         edit_style = (style_override or (c["ai"] or {}).get("edit_style") or (run_d.get("stats") or {}).get("style")
-                      or render_cfg.get("edit_style", "highlight"))
+                      or (st_d or {}).get("edit_style") or render_cfg.get("edit_style", "highlight"))
         fx = None
         troll_plan = None
         new_plan = False
@@ -490,6 +498,12 @@ class Engine:
         thumb_at = troll.TimeMap(troll_plan["slowmo"])(peak_off) if troll_plan else peak_off - trim_start
         thumb = render.thumbnail(final, clip_dir / "thumb.jpg", max(0.5, min(out_dur - 0.5, thumb_at)))
         style_info = {"edit_style": edit_style, "troll_plan": troll_plan} if troll_plan else {"edit_style": edit_style}
+        if fx and fx.get("credits"):
+            style_info["el_credits"] = fx["credits"]
+            bus.activity("clip", f"Clip #{clip_id}: used about {fx['credits']} ElevenLabs credits", level="muted", clip_id=clip_id)
+        if fx and fx.get("credits_skipped"):
+            bus.activity("clip", f"Clip #{clip_id}: credit budget reached — {fx['credits_skipped']} sound(s) used the built-in kit",
+                         level="muted", clip_id=clip_id)
 
         with db.session() as s:
             clip = s.get(Clip, clip_id)

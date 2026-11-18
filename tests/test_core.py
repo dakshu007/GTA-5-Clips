@@ -394,3 +394,108 @@ def test_troll_director_uses_claude_json(monkeypatch, tmp_path):
     assert out["source"] == "claude" and out["virality"] == 91
     assert captured["output_config"]["format"]["schema"]["properties"]["events"]
     assert any(b.get("type") == "image" for b in captured["messages"][0]["content"])
+
+
+def _el_setup(monkeypatch, tmp_path, **cfg):
+    from gtaclips import config, db, trollkit
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    db.init(f"sqlite:///{tmp_path}/t.sqlite")
+    db.update_settings("elevenlabs", {"api_key": "sk-test", "voice_id": "VOICE1", **cfg})
+    trollkit._balance.update(at=0.0, key="")
+    return trollkit
+
+
+def test_credit_saver_only_spends_on_the_narrator(monkeypatch, tmp_path):
+    import httpx
+
+    trollkit = _el_setup(monkeypatch, tmp_path)  # credit saver is on by default
+    posts = []
+    monkeypatch.setattr(trollkit.httpx, "post", lambda url, **kw: posts.append((url, kw["json"])) or httpx.Response(200, content=b"ID3" + b"\0" * 1000))
+    monkeypatch.setattr(trollkit.httpx, "get", lambda url, **kw: httpx.Response(
+        200, json={"character_count": 970, "character_limit": 2000, "tier": "free"}, request=httpx.Request("GET", url)))
+    budget = trollkit.Budget()
+    assert trollkit.resolve_sfx("cartoon slide whistle", 1.5, budget=budget).name.startswith("builtin_")
+    music = trollkit.resolve_music("phonk", 45, budget=budget)
+    assert music.name.startswith("beat_") and music.stat().st_size > 100_000  # free built-in beat
+    assert trollkit.resolve_narration("Bro really thought he had it", budget=budget)
+    assert [u.rsplit("/", 2)[-2] for u, _ in posts] == ["text-to-speech"]  # nothing else was paid for
+    assert posts[0][1]["model_id"] == "eleven_flash_v2_5"  # half-price voice model
+    assert budget.spent == trollkit.tts_cost("Bro really thought he had it") == 14
+    # the same line again is cached: no request, no credits
+    assert trollkit.resolve_narration("Bro really thought he had it", budget=budget) and len(posts) == 1
+    assert trollkit.el_credits()["remaining"] == 1030 - 14
+
+
+def test_budget_and_reserve_stop_spending(monkeypatch, tmp_path):
+    import httpx
+
+    trollkit = _el_setup(monkeypatch, tmp_path, max_credits_per_clip=30, reserve=50)
+    posts = []
+    monkeypatch.setattr(trollkit.httpx, "post", lambda url, **kw: posts.append(url) or httpx.Response(200, content=b"ID3" + b"\0" * 1000))
+    balance = {"character_count": 0, "character_limit": 70}
+    monkeypatch.setattr(trollkit.httpx, "get", lambda url, **kw: httpx.Response(200, json=balance, request=httpx.Request("GET", url)))
+    b = trollkit.Budget()
+    assert trollkit.resolve_narration("one two three four five six", budget=b)  # 14 credits: 70 - 14 >= 50
+    assert trollkit.resolve_narration("this second line would dip below the reserve", budget=b) is None
+    assert len(posts) == 1 and b.skipped == 1
+    balance["character_limit"] = 10_000
+    trollkit._balance.update(at=0.0)
+    b2 = trollkit.Budget()
+    assert trollkit.resolve_narration("a fresh line that fits in the clip budget", budget=b2)
+    assert trollkit.resolve_narration("but this one goes over the thirty credit cap", budget=b2) is None
+
+
+def test_credits_unknown_when_key_cannot_read_balance(monkeypatch, tmp_path):
+    import httpx
+
+    trollkit = _el_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(trollkit.httpx, "get", lambda url, **kw: httpx.Response(401, json={"detail": {"status": "missing_permissions", "message": "The API key you used is missing the permission user_read"}}, request=httpx.Request("GET", url)))
+    bal = trollkit.el_credits(refresh=True)
+    assert bal["remaining"] is None and "permission" in bal["error"]
+    assert trollkit.Budget().allow(20)  # unknown balance: the per-clip budget still applies
+
+
+def test_beats_are_seamless_loops_at_even_loudness(tmp_path):
+    import wave
+
+    import numpy as np
+
+    from gtaclips import beats
+
+    rms = []
+    for mood in beats.MOODS:
+        p = beats.make(mood, tmp_path / f"{mood}.wav")
+        with wave.open(str(p)) as w:
+            assert w.getnchannels() == 2 and w.getframerate() == 48000
+            x = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(float) / 32767
+        assert 8 < len(x) / 2 / 48000 < 25 and np.abs(x).max() <= 0.9
+        rms.append(float(np.sqrt(np.mean(x ** 2))))
+        jump = abs(x[-2] - x[0]) + abs(x[-1] - x[1])  # end flows into start (note tails wrapped)
+        assert jump < 0.5
+    assert max(rms) / min(rms) < 2.0
+
+
+def test_streamer_edit_style_column_is_added_to_old_databases(tmp_path):
+    import sqlite3
+
+    from gtaclips import db
+    from gtaclips.db import Streamer
+
+    path = tmp_path / "old.sqlite"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE streamers (id INTEGER PRIMARY KEY, name VARCHAR(120), platform VARCHAR(20), channel VARCHAR(200), "
+                "url VARCHAR(500), permission BOOLEAN, auto_watch BOOLEAN, layout VARCHAR(20), facecam JSON, cpm FLOAT, "
+                "notes TEXT, is_live BOOLEAN, last_checked DATETIME, created_at DATETIME)")
+    con.execute("INSERT INTO streamers (name, platform, channel, url, permission, auto_watch, layout, cpm, notes, is_live) "
+                "VALUES ('old', 'kick', 'old', 'https://kick.com/old', 1, 0, 'auto', 0, '', 0)")
+    con.commit()
+    con.close()
+    db.init(f"sqlite:///{path}")
+    db.init(f"sqlite:///{path}")  # running the migration twice is harmless
+    with db.session() as s:
+        st = s.query(Streamer).one()
+        assert st.to_dict()["edit_style"] == ""
+        st.edit_style = "troll"
+    with db.session() as s:
+        assert s.query(Streamer).one().edit_style == "troll"

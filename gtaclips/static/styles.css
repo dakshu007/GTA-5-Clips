@@ -492,3 +492,7 @@ details.help summary { cursor: pointer; font-weight: 700; color: var(--text); }
   .sig-bars { grid-template-columns: repeat(3, 1fr); }
   .hbar { grid-template-columns: 90px 1fr 64px; }
 }
+
+.credits { border: 1px solid var(--line, rgba(255,255,255,.08)); border-radius: 12px; padding: 12px 14px; margin: 10px 0 14px; background: rgba(255,255,255,.02); }
+.credit-bar { height: 8px; border-radius: 99px; background: rgba(255,255,255,.08); overflow: hidden; margin-top: 8px; }
+.credit-bar i { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, #7c5cff, #ff4d8d); }

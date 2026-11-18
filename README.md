@@ -23,7 +23,7 @@ Live stream ─▶ rolling buffer ─▶ moment detection ─▶ cut ─▶ AI e
 | **ElevenLabs credits** | **Credit saver** (on by default) spends credits only on the narrator voice, using the half-price Flash model. Each clip has a credit cap, a reserve is never spent, everything is cached, and the settings page shows your balance and roughly how many clips it covers. |
 | **Review** | A grid of clips you swipe through. Press **A** to approve, **S** to skip, and use the arrow keys to move between clips. You can edit the hook, title and caption, switch layout, or re-run the AI. |
 | **Scheduler** | Each approved clip takes the next free posting slot, one post per platform per slot. Failed uploads retry automatically. **Autopilot** can approve high-virality clips by itself. |
-| **Publishing** | YouTube Data API v3 (resumable upload) and Instagram Graph API (resumable Reels upload, no public URL needed). |
+| **Publishing** | YouTube Data API v3 (resumable upload of the full-quality render) and Instagram Graph API (resumable Reels upload, no public URL needed). Instagram gets its own 1080×1920 copy made to its Reels spec, and a refused upload is retried with a fresh container. |
 | **Money** | Views, estimated earnings per streamer and platform, which trigger types get the most views, and **auto-tune**, which re-weights detection based on your own view data. |
 | **VOD Lab** | Drop in a past broadcast or paste a link (Twitch, YouTube, Kick, or anything yt-dlp can download). It finds the best moments and clips them. **Replay live** runs a file through the live pipeline, which is useful for testing. |
 

@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from . import db
+from . import db, media
 
 log = logging.getLogger(__name__)
 
@@ -165,10 +165,58 @@ def _ig(cfg: dict) -> tuple[str, str, str]:
 
 def _ig_error(r: httpx.Response) -> str:
     try:
-        err = r.json().get("error", {})
-        return f"{err.get('message', r.text[:300])} (code {err.get('code')})"
+        body = r.json()
     except Exception:
-        return r.text[:300]
+        return f"HTTP {r.status_code}: {r.text[:300]}"
+    if "debug_info" in body:  # the upload host (rupload) answers in its own format
+        d = body["debug_info"] or {}
+        return f"{d.get('type', 'error')}: {d.get('message', '')} (HTTP {r.status_code})"
+    err = body.get("error", {})
+    msg = err.get("error_user_msg") or err.get("message") or r.text[:300]
+    return f"{msg} (code {err.get('code')}{', ' + str(err['error_subcode']) if err.get('error_subcode') else ''})"
+
+
+IG_MAX_W = 1080  # Instagram stores and plays Reels at 1080x1920; sending more only risks a failed upload
+
+
+def instagram_file(video: Path) -> Path:
+    """A copy of the clip made exactly to Instagram's Reels spec.
+
+    Instagram re-encodes every Reel to 1080x1920 anyway. Sending it a clean 1080p file
+    (H.264 High, closed GOP, peak bitrate well under its 25 Mbps limit, AAC 48 kHz, moov atom
+    first) uploads faster, avoids "ProcessingFailedError", and our sharp Lanczos downscale
+    looks better than Instagram's own.
+    """
+    out = video.with_name(video.stem + "_ig.mp4")
+    if out.exists() and out.stat().st_size > 1000 and out.stat().st_mtime >= video.stat().st_mtime:
+        return out
+    w, _h = media.video_size(video)
+    fps = 30.0
+    for st in media.probe(video).get("streams", []):
+        if st.get("codec_type") == "video":
+            num, _, den = str(st.get("avg_frame_rate") or "30/1").partition("/")
+            try:
+                fps = float(num) / float(den or 1)
+            except (ValueError, ZeroDivisionError):
+                pass
+    fps = 60 if fps > 50 else 30
+    vf = f"scale={IG_MAX_W}:-2:flags=lanczos," if w > IG_MAX_W else ""
+    vf += "setsar=1,format=yuv420p"
+    tmp = out.with_name(out.stem + ".tmp.mp4")
+
+    def build(enc: list[str], dec: list[str]) -> list[str]:
+        rate = ["-maxrate", "16M", "-bufsize", "24M", "-level", "4.2"] if enc[1] == "libx264" else []
+        return [media.FFMPEG, "-v", "error", "-nostdin", "-y", *dec, "-i", str(video), "-map", "0:v:0", "-map", "0:a:0?",
+                "-vf", vf, "-r", str(fps), *enc, *rate, "-g", str(fps * 2), "-bf", "2",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+                "-movflags", "+faststart", str(tmp)]
+
+    try:
+        media.run_encode(build, timeout=900, bitrate="12M", crf=17, preset="medium")
+        tmp.replace(out)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return out
 
 
 def instagram_check() -> dict:
@@ -182,39 +230,60 @@ def instagram_check() -> dict:
     return data
 
 
+def _ig_container_and_upload(c: httpx.Client, base: str, uid: str, token: str, cfg: dict, video: Path,
+                             caption: str, public_url: str | None) -> str:
+    mode = cfg.get("upload_mode", "resumable")
+    params = {
+        "media_type": "REELS",
+        "caption": caption[:2150],
+        "share_to_feed": "true" if cfg.get("share_to_feed", True) else "false",
+        "access_token": token,
+    }
+    if mode == "url":
+        if not public_url:
+            raise PublishError("Instagram URL mode needs a Public base URL in Settings → General")
+        params["video_url"] = public_url
+    else:
+        params["upload_type"] = "resumable"
+    r = c.post(f"{base}/{uid}/media", data=params)
+    if r.status_code != 200:
+        raise PublishError(f"Instagram container failed: {_ig_error(r)}")
+    container = r.json()["id"]
+    if mode != "url":
+        upload_uri = r.json().get("uri") or f"https://rupload.facebook.com/ig-api-upload/{cfg.get('graph_version') or 'v23.0'}/{container}"
+        size = video.stat().st_size
+        with video.open("rb") as f:
+            up = c.post(upload_uri, content=f.read(), headers={
+                "Authorization": f"OAuth {token}",
+                "offset": "0",
+                "file_size": str(size),
+                "Content-Type": "application/octet-stream",
+            })
+        if up.status_code != 200:
+            raise _UploadFailed(f"Instagram video upload failed: {_ig_error(up)}")
+    return container
+
+
+class _UploadFailed(PublishError):
+    """The video bytes were refused; Meta says to start again with a new container."""
+
+
 def instagram_upload(video: Path, caption: str, public_url: str | None = None) -> dict:
     cfg = db.get_settings("instagram")
     base, uid, token = _ig(cfg)
-    mode = cfg.get("upload_mode", "resumable")
+    if cfg.get("upload_mode", "resumable") != "url":
+        video = instagram_file(video)
     with httpx.Client(timeout=httpx.Timeout(60, read=600, write=600)) as c:
-        params = {
-            "media_type": "REELS",
-            "caption": caption[:2150],
-            "share_to_feed": "true" if cfg.get("share_to_feed", True) else "false",
-            "access_token": token,
-        }
-        if mode == "url":
-            if not public_url:
-                raise PublishError("Instagram URL mode needs a Public base URL in Settings → General")
-            params["video_url"] = public_url
-        else:
-            params["upload_type"] = "resumable"
-        r = c.post(f"{base}/{uid}/media", data=params)
-        if r.status_code != 200:
-            raise PublishError(f"Instagram container failed: {_ig_error(r)}")
-        container = r.json()["id"]
-        if mode != "url":
-            upload_uri = r.json().get("uri") or f"https://rupload.facebook.com/ig-api-upload/{cfg.get('graph_version') or 'v23.0'}/{container}"
-            size = video.stat().st_size
-            with video.open("rb") as f:
-                up = c.post(upload_uri, content=f.read(), headers={
-                    "Authorization": f"OAuth {token}",
-                    "offset": "0",
-                    "file_size": str(size),
-                    "Content-Type": "application/octet-stream",
-                })
-            if up.status_code != 200:
-                raise PublishError(f"Instagram video upload failed: {_ig_error(up)}")
+        container = ""
+        for attempt in range(3):
+            try:
+                container = _ig_container_and_upload(c, base, uid, token, cfg, video, caption, public_url)
+                break
+            except _UploadFailed as exc:
+                log.warning("Instagram upload attempt %d failed: %s", attempt + 1, exc)
+                if attempt == 2:
+                    raise
+                time.sleep(8 * (attempt + 1))
         # wait for Instagram to process the video
         deadline = time.time() + 600
         status = ""
@@ -224,7 +293,8 @@ def instagram_upload(video: Path, caption: str, public_url: str | None = None) -
             if status == "FINISHED":
                 break
             if status in ("ERROR", "EXPIRED"):
-                raise PublishError(f"Instagram processing failed: {st.json().get('status', status)}")
+                raise PublishError(f"Instagram processing failed: {st.json().get('status', status)} — check the clip meets "
+                                   "Reels limits (3 s – 15 min, under 300 MB)")
             time.sleep(6)
         if status != "FINISHED":
             raise PublishError("Instagram processing timed out")

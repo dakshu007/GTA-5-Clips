@@ -499,3 +499,54 @@ def test_streamer_edit_style_column_is_added_to_old_databases(tmp_path):
         st.edit_style = "troll"
     with db.session() as s:
         assert s.query(Streamer).one().edit_style == "troll"
+
+
+def test_instagram_retries_failed_upload_with_a_new_container(monkeypatch, tmp_path):
+    import httpx
+
+    from gtaclips import config, db, publishers
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    db.init(f"sqlite:///{tmp_path}/t.sqlite")
+    db.update_settings("instagram", {"user_id": "IGU", "access_token": "tok"})
+    video = tmp_path / "video_ig.mp4"
+    video.write_bytes(b"\0" * 2000)
+    monkeypatch.setattr(publishers, "instagram_file", lambda v: video)
+    monkeypatch.setattr(publishers.time, "sleep", lambda s: None)
+    calls = {"containers": 0, "uploads": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if url.endswith("/IGU/media"):
+            calls["containers"] += 1
+            return httpx.Response(200, json={"id": f"C{calls['containers']}", "uri": f"https://rupload.facebook.com/x/C{calls['containers']}"})
+        if "rupload" in url:
+            calls["uploads"] += 1
+            if calls["uploads"] < 3:  # Meta's flaky "ProcessingFailedError"
+                return httpx.Response(400, json={"debug_info": {"retriable": False, "type": "ProcessingFailedError",
+                                                                "message": "Request processing failed"}})
+            assert req.headers["file_size"] == "2000"
+            return httpx.Response(200, json={"success": True})
+        if "/C3" in url and req.method == "GET":
+            return httpx.Response(200, json={"status_code": "FINISHED"})
+        if url.endswith("/media_publish"):
+            assert b"creation_id=C3" in req.content
+            return httpx.Response(200, json={"id": "M1"})
+        if "/M1" in url:
+            return httpx.Response(200, json={"permalink": "https://instagram.com/reel/x"})
+        raise AssertionError(url)
+
+    real = httpx.Client
+    monkeypatch.setattr(publishers.httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler)))
+    res = publishers.instagram_upload(tmp_path / "video.mp4", "caption")
+    assert res == {"external_id": "M1", "url": "https://instagram.com/reel/x"}
+    assert calls == {"containers": 3, "uploads": 3}
+
+
+def test_rupload_error_message_is_readable():
+    import httpx
+
+    from gtaclips import publishers
+
+    r = httpx.Response(400, json={"debug_info": {"retriable": False, "type": "ProcessingFailedError", "message": "Request processing failed"}})
+    assert publishers._ig_error(r) == "ProcessingFailedError: Request processing failed (HTTP 400)"

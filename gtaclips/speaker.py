@@ -162,17 +162,24 @@ def streamer_print(cands: list[dict]) -> np.ndarray | None:
 
 
 def _remember(cands: list[dict], cents: list[np.ndarray], secs: list[float]) -> list[dict]:
+    """Add this clip's voices to the per-streamer memory. A voice counts ONCE per clip, so a
+    game character who speaks several times in one cutscene can't outvote the streamer."""
+    seen_this_clip: set[int] = set()
     for cent, s in zip(cents, secs):
         sims = [float(np.array(c["emb"]) @ cent) for c in cands]
         if sims and max(sims) >= SAME_SPEAKER:
-            c = cands[int(np.argmax(sims))]
-            w = c["clips"]
-            m = (np.array(c["emb"]) * w + cent) / (w + 1)
+            k = int(np.argmax(sims))
+            c = cands[k]
+            w = max(1.0, c["seconds"])
+            m = np.array(c["emb"]) * w + cent * s  # duration-weighted running mean
             c["emb"] = (m / (np.linalg.norm(m) + 1e-9)).round(5).tolist()
-            c["clips"] += 1
+            if k not in seen_this_clip:
+                c["clips"] += 1
+                seen_this_clip.add(k)
             c["seconds"] = round(c["seconds"] + s, 1)
         else:
             cands.append({"emb": cent.round(5).tolist(), "clips": 1, "seconds": round(s, 1)})
+            seen_this_clip.add(len(cands) - 1)
     return cands
 
 
@@ -201,17 +208,28 @@ def streamer_mask(vocals: np.ndarray, rate: int, key: str) -> tuple[np.ndarray, 
         c = np.mean(embs[cl], axis=0)
         cents.append(c / (np.linalg.norm(c) + 1e-9))
     with _store_lock:
-        cands = load_prints(key)
+        # remember this clip's voices first, so a voice that also talked in an earlier clip
+        # is recognised as the streamer straight away
+        cands = _remember(load_prints(key), cents, secs)
         known = streamer_print(cands)
         if known is not None:
             info["learned"] = True
-            is_streamer = [float(e @ known) >= STREAMER_MATCH for e in embs]
+            # Each talking bit goes to the CLOSEST known voice; it's muted only if that is the
+            # streamer (and it's a reasonable match) — a game character who merely sounds a bit
+            # like the streamer stays in, because their own voice is closer.
+            others = [np.array(c["emb"], dtype=np.float32) for c in cands
+                      if float(np.array(c["emb"]) @ known) < SAME_SPEAKER]
+            is_streamer = []
+            for e in embs:
+                s_sim = float(e @ known)
+                o_sim = max((float(e @ o) for o in others), default=-1.0)
+                is_streamer.append(s_sim >= STREAMER_MATCH and s_sim >= o_sim)
         else:
             # not learned yet: the voice that talks most in this clip is the streamer
             top = int(np.argmax(secs))
             members = set(clusters[top])
             is_streamer = [i in members for i in range(len(segs))]
-        save_prints(key, _remember(cands, cents, secs))
+        save_prints(key, cands)
     fade = int(0.04 * rate)
     ramp = np.linspace(1, 0, fade, dtype=np.float32) if fade else np.zeros(0, dtype=np.float32)
     for (s, e), mute in zip(segs, is_streamer):

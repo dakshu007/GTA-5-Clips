@@ -252,3 +252,39 @@ def test_back_to_back_moments_never_overlap():
         assert e1 <= s2, spans  # no shared footage
     for s, e in spans:
         assert e - s >= 39, spans
+
+
+# ---------------------------------------------------------------- streamer voice learning (no model needed)
+
+def _unit(v):
+    v = np.asarray(v, dtype=np.float32)
+    return v / np.linalg.norm(v)
+
+
+def test_voice_counts_once_per_clip_so_cutscenes_cant_outvote_the_streamer():
+    from gtaclips import speaker
+
+    streamer, npc = _unit([1, 0, 0]), _unit([0, 1, 0])
+    cands: list = []
+    # clip 1: a cutscene — the game character talks in 3 separate bits, the streamer once
+    cands = speaker._remember(cands, [npc, npc, npc, streamer], [3.0, 3.0, 3.0, 1.0])
+    # clip 2 and 3: normal gameplay, only the streamer talks
+    cands = speaker._remember(cands, [streamer], [4.0])
+    cands = speaker._remember(cands, [streamer], [4.0])
+    learned = speaker.streamer_print(cands)
+    assert learned is not None and float(learned @ streamer) > 0.99
+    assert max(c["clips"] for c in cands if float(np.array(c["emb"]) @ npc) > 0.9) == 1
+
+
+def test_speech_segments_finds_talking_and_splits_long_bits():
+    from gtaclips import speaker
+
+    rate = speaker.RATE
+    silence = np.zeros(rate, dtype=np.float32)
+    talk = (0.3 * np.sin(np.linspace(0, 2000, int(rate * 4.5)))).astype(np.float32)
+    segs = speaker.speech_segments(np.concatenate([silence, talk, silence]))
+    assert segs and all(e - s <= int(2.0 * rate * 1.41) for s, e in segs)
+    covered = sum(e - s for s, e in segs) / rate
+    assert 4.0 <= covered <= 4.8
+    assert segs[0][0] >= int(0.9 * rate)
+    assert speaker.speech_segments(silence) == []

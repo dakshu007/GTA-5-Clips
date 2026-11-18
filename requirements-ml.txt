@@ -6,3 +6,4 @@ pytesseract>=0.3.10
 demucs>=4.0.1
 # Optional: tell the streamer's voice apart from in-game dialogue, so dialogue is kept
 resemblyzer>=0.1.4
+setuptools<81  # resemblyzer still imports pkg_resources

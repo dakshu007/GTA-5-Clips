@@ -1,0 +1,188 @@
+"""Fast tests for detection, parsing, auth and caption logic (no network, no GPU)."""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from gtaclips import auth, capture, chat, render, signals
+
+
+# ---------------------------------------------------------------- URL parsing
+
+@pytest.mark.parametrize(
+    "text,platform,channel",
+    [
+        ("https://www.twitch.tv/xQc", "twitch", "xQc"),
+        ("twitch.tv/summit1g/", "twitch", "summit1g"),
+        ("kaicenat", "twitch", "kaicenat"),
+        ("https://kick.com/adinross", "kick", "adinross"),
+        ("https://www.youtube.com/@IShowSpeed", "youtube", "@IShowSpeed"),
+        ("https://www.youtube.com/channel/UC123/live", "youtube", "UC123"),
+    ],
+)
+def test_parse_source(text, platform, channel):
+    p = capture.parse_source(text)
+    assert p["platform"] == platform
+    assert p["channel"] == channel
+
+
+def test_parse_twitch_vod_has_no_channel():
+    p = capture.parse_source("https://www.twitch.tv/videos/123456")
+    assert p["platform"] == "twitch" and p["channel"] == ""
+
+
+def test_platform_url():
+    assert capture.platform_url("twitch", "abc", "") == "twitch.tv/abc"
+    assert capture.platform_url("other", "", "https://www.example.com/x/") == "example.com/x"
+
+
+# ---------------------------------------------------------------- auth
+
+def test_password_hash_roundtrip():
+    h = auth.hash_password("correct horse")
+    assert auth.verify_password("correct horse", h)
+    assert not auth.verify_password("wrong", h)
+    assert not auth.verify_password("x", "garbage")
+
+
+def test_lockout_after_failures():
+    ip = "203.0.113.9"
+    auth.clear_failures(ip)
+    for _ in range(auth.MAX_FAILS):
+        assert auth.locked_out(ip) == 0
+        auth.record_failure(ip)
+    assert auth.locked_out(ip) > 0
+    auth.clear_failures(ip)
+    assert auth.locked_out(ip) == 0
+
+
+# ---------------------------------------------------------------- chat
+
+def test_message_weight_hype_beats_plain():
+    words = ["lmao", "kekw", "💀", "no way"]
+    plain = chat.message_weight("what time is it", words)
+    hype = chat.message_weight("NO WAY KEKW 💀💀", words)
+    assert plain == 1.0
+    assert hype > plain + 1
+
+
+def test_twitch_irc_parsing():
+    got = []
+    tc = chat.TwitchChat("chan", lambda ts, w, text: got.append((w, text)), ["lmao"])
+    tc._handle("@badge-info=;bits=500;color= :u!u@u.tmi.twitch.tv PRIVMSG #chan :lmao that was insane")
+    tc._handle(":u!u@u.tmi.twitch.tv PRIVMSG #chan :hello")
+    tc._handle("@msg-id=sub :tmi.twitch.tv USERNOTICE #chan :thanks for the sub")
+    assert [t for _, t in got] == ["lmao that was insane", "hello", "thanks for the sub"]
+    assert got[0][0] > got[1][0]  # hype word + bits weigh more
+    assert got[2][0] >= 4  # subs are big events
+
+
+# ---------------------------------------------------------------- detection
+
+def _feed(an: signals.Analyzer, audio_db: np.ndarray, chat_rate: np.ndarray | None = None):
+    for t, v in enumerate(audio_db):
+        an.tl.put_max("audio", t, float(v))
+        an.tl.put_max("motion", t, 1.0)
+        if chat_rate is not None:
+            an.chat_rate(t, float(chat_rate[t]))
+
+
+CFG = {
+    "threshold": 0.55, "weights": {"audio": 1.0, "chat": 1.3, "speech": 0.9, "motion": 0.5, "game": 1.2},
+    "pre_roll": 10, "post_roll": 6, "min_len": 15, "max_len": 58, "cooldown": 25, "warmup": 20,
+}
+
+
+def test_analyzer_finds_audio_spikes():
+    rng = np.random.default_rng(0)
+    audio = -40 + rng.normal(0, 1.0, 200)
+    audio[80:83] = -8  # scream
+    audio[150:152] = -6  # explosion
+    found = []
+    an = signals.Analyzer(CFG, on_moment=found.append)
+    _feed(an, audio)
+    an.advance(200, final=True)
+    peaks = [m.peak for m in found]
+    assert len(found) == 2, peaks
+    assert 79 <= peaks[0] <= 83 and 149 <= peaks[1] <= 152
+    for m in found:
+        assert CFG["min_len"] <= m.end - m.start <= CFG["max_len"]
+        assert m.start <= m.peak <= m.end
+
+
+def test_analyzer_quiet_stream_has_no_moments():
+    rng = np.random.default_rng(1)
+    found = []
+    an = signals.Analyzer(CFG, on_moment=found.append)
+    _feed(an, -40 + rng.normal(0, 1.0, 300))
+    an.advance(300, final=True)
+    assert found == []
+
+
+def test_chat_spike_alone_triggers():
+    rng = np.random.default_rng(2)
+    audio = -40 + rng.normal(0, 0.5, 200)
+    rate = rng.poisson(2, 200).astype(float)
+    rate[124:132] = 40  # chat explodes a few seconds after the moment at ~120
+    found = []
+    an = signals.Analyzer(CFG, on_moment=found.append)
+    _feed(an, audio, rate)
+    an.advance(200, final=True)
+    assert len(found) == 1
+    assert found[0].signals["top"] == "chat"
+    assert 115 <= found[0].peak <= 130
+
+
+def test_incremental_matches_batch():
+    """Feeding a live stream 4 s at a time must find the same moments as one pass."""
+    rng = np.random.default_rng(3)
+    audio = -40 + rng.normal(0, 1.0, 240)
+    audio[100:103] = -5
+    batch, live = [], []
+    a1 = signals.Analyzer(CFG, on_moment=batch.append)
+    _feed(a1, audio)
+    a1.advance(240, final=True)
+    a2 = signals.Analyzer(CFG, on_moment=live.append)
+    for start in range(0, 240, 4):
+        for t in range(start, start + 4):
+            a2.tl.put_max("audio", t, float(audio[t]))
+            a2.tl.put_max("motion", t, 1.0)
+        a2.advance(start + 4)
+    a2.advance(240, final=True)
+    assert [m.peak for m in batch] == [m.peak for m in live]
+
+
+def test_combine_soft_or():
+    one = signals.combine({"audio": np.array([1.0]), "chat": np.array([0.0])}, {"audio": 1.0, "chat": 1.3})
+    two = signals.combine({"audio": np.array([0.6]), "chat": np.array([0.6])}, {"audio": 1.0, "chat": 1.3})
+    none = signals.combine({"audio": np.array([0.0])}, {"audio": 1.0})
+    assert none[0] == 0
+    assert one[0] > 0.55  # one strong signal can trigger
+    assert two[0] > 0.55  # two medium signals agreeing also trigger
+
+
+# ---------------------------------------------------------------- captions
+
+def test_chunk_words_breaks_on_gaps_and_punctuation():
+    words = [{"w": w, "s": s, "e": s + 0.3} for w, s in [("no", 0), ("way", 0.3), ("bro!", 0.6), ("he", 0.9), ("did", 2.5)]]
+    chunks = render.chunk_words(words)
+    assert [[w["w"] for w in c] for c in chunks] == [["no", "way", "bro!"], ["he"], ["did"]]
+
+
+def test_build_ass_has_hook_credit_and_highlight():
+    words = [{"w": "hello", "s": 0.1, "e": 0.4}, {"w": "chat", "s": 0.5, "e": 0.9}]
+    ass = render.build_ass(words, 10, "He stole a cop car 💀", "🎥 twitch.tv/x", {"captions": True, "highlight_color": "#FFE600"})
+    assert "HE STOLE A COP CAR" in ass and "💀" not in ass
+    assert "twitch.tv/x" in ass
+    assert ass.count("Style: Caption") == 1
+    assert "\\c&H0000E6FF" in ass  # yellow highlight in ASS BGR order
+
+
+def test_ass_color():
+    assert render.ass_color("#FF2E88") == "&H00882EFF"
+
+
+def test_video_filter_layouts():
+    assert "vstack" in render.video_filter("split", 1920, 1080, {"x": 0.7, "y": 0.7, "w": 0.3, "h": 0.3}, 0.5)
+    assert "boxblur" in render.video_filter("blur", 1920, 1080, None, 0.5)
+    assert render.video_filter("crop", 1920, 1080, None, 0.5).startswith("[0:v]crop=606:1080")

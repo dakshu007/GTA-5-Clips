@@ -1,0 +1,9 @@
+[project]
+name = "gtaclips"
+version = "1.0.0"
+description = "HYPECUT — watches GTA live streams, finds the key moments and turns them into Shorts and Reels"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

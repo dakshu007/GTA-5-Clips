@@ -1,0 +1,4 @@
+# Optional: speech-to-text for burned-in captions and transcript signals
+faster-whisper>=1.0
+# Optional: OCR for in-game banners (also needs the tesseract binary)
+pytesseract>=0.3.10

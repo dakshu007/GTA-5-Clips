@@ -1,0 +1,18 @@
+services:
+  hypecut:
+    build: .
+    restart: unless-stopped
+    # Bound to localhost only — reach it from other devices through Tailscale or a
+    # Cloudflare Tunnel, never by opening this port to the internet.
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/data
+    # Uncomment for NVIDIA GPU speech-to-text (needs nvidia-container-toolkit)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]

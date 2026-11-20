@@ -556,6 +556,33 @@ async def rerender_clip(cid: int, request: Request) -> dict:
     return d
 
 
+@app.post("/api/clips/delete-all", dependencies=[Auth])
+async def delete_clips_by_status(request: Request) -> dict:
+    """Delete every clip with the given status (skipped or failed). Busy or posted clips are left alone."""
+    body = await request.json()
+    status = str(body.get("status", ""))
+    if status not in ("rejected", "failed"):
+        raise HTTPException(400, "only skipped or failed clips can be bulk-deleted")
+    deleted, kept = [], 0
+    with db.session() as s:
+        for c in s.scalars(select(Clip).where(Clip.status == status)).all():
+            if engine.is_busy(c.id) or s.scalars(select(Post).where(
+                    Post.clip_id == c.id, Post.status.in_(("posted", "posting")))).first():
+                kept += 1
+                continue
+            for post in s.scalars(select(Post).where(Post.clip_id == c.id)):
+                s.delete(post)
+            s.delete(c)
+            deleted.append(c.id)
+    for cid in deleted:
+        shutil.rmtree(config.CLIPS_DIR / str(cid), ignore_errors=True)
+        bus.publish("clip_deleted", id=cid)
+    label = "skipped" if status == "rejected" else "failed"
+    if deleted:
+        bus.activity("clip", f"Deleted {len(deleted)} {label} clip{'s' if len(deleted) != 1 else ''}", level="muted")
+    return {"deleted": len(deleted), "kept": kept}
+
+
 @app.delete("/api/clips/{cid}", dependencies=[Auth])
 async def delete_clip(cid: int) -> dict:
     if engine.is_busy(cid):

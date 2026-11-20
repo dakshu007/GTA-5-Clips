@@ -453,21 +453,25 @@ const TABS = [["ready", "To review"], ["scheduled", "Scheduled"], ["posted", "Po
 async function pageReview(page, seq) {
   if (S.params.get("tab")) S.reviewTab = S.params.get("tab");
   page.innerHTML = header("Review", "Approve with <span class='kbd'>A</span>, skip with <span class='kbd'>S</span>, move with <span class='kbd'>←</span> <span class='kbd'>→</span>",
-    `<button class="btn" id="retry-failed">${ic("refresh")} Retry failed</button><button class="btn danger" id="delete-failed">${ic("trash")} Delete failed</button><button class="btn" id="approve-all">${ic("check")} Approve all 70+</button>`) +
+    `<button class="btn" id="retry-failed">${ic("refresh")} Retry failed</button><button class="btn danger" id="delete-skipped">${ic("trash")} Delete skipped</button><button class="btn danger" id="delete-failed">${ic("trash")} Delete failed</button><button class="btn" id="approve-all">${ic("check")} Approve all 70+</button>`) +
     `<div class="tabs" id="tabs"></div><div id="grid"></div>`;
   S.clips = await api("/api/clips?limit=400");
   if (stale(seq)) return;
   paintReviewGrid();
-  $("#delete-failed").onclick = async () => {
-    const failed = S.clips.filter((c) => c.status === "failed");
-    if (!failed.length) return toast("No failed clips");
-    if (!(await confirmBox("Delete all failed clips?", `${failed.length} failed clips and their files will be removed.`, "Delete", true))) return;
-    let n = 0;
-    for (const c of failed) { try { await api(`/api/clips/${c.id}`, { method: "DELETE" }); n++; } catch { /* busy — leave it */ } }
-    S.clips = await api("/api/clips?limit=400");
-    paintReviewGrid();
-    toast(`Deleted ${n} clip${n === 1 ? "" : "s"}`);
+  const deleteAll = async (status, label) => {
+    const n0 = S.clips.filter((c) => c.status === status).length;
+    if (!n0) return toast(`No ${label} clips`);
+    if (!(await confirmBox(`Delete all ${label} clips?`, `${n0} ${label} clip${n0 === 1 ? "" : "s"} and their video files will be removed from your Mac. This can't be undone.`, "Delete all", true))) return;
+    try {
+      const r = await api("/api/clips/delete-all", { method: "POST", body: { status } });
+      S.clips = await api("/api/clips?limit=400");
+      if (!$("#grid")) return;
+      paintReviewGrid();
+      toast(`Deleted ${r.deleted} ${label} clip${r.deleted === 1 ? "" : "s"}${r.kept ? ` · kept ${r.kept} (posted or still processing)` : ""}`);
+    } catch (e) { fail(e); }
   };
+  $("#delete-skipped").onclick = () => deleteAll("rejected", "skipped");
+  $("#delete-failed").onclick = () => deleteAll("failed", "failed");
   $("#retry-failed").onclick = async () => {
     const failed = S.clips.filter((c) => c.status === "failed");
     if (!failed.length) return toast("No failed clips");
